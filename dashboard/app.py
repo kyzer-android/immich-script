@@ -278,7 +278,7 @@ def _force_exif_orientation_normal(path: Path) -> None:
 class GalleryResolveItem(BaseModel):
     backup_id: str
     relative_path: str
-    keep: str  # "before" (restaure l'original) ou "after" (garde la correction)
+    keep: str  # "before" (restaure l'original, EXIF forcé à 1) | "after" (garde la correction) | "unresolved" (ni l'un ni l'autre, laissé pour plus tard, restaure l'original sans rien déclarer)
 
 
 class GalleryResolveBatch(BaseModel):
@@ -326,14 +326,32 @@ def resolve_gallery_batch(payload: GalleryResolveBatch):
                 library_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(backup_path, library_path)
                 _force_exif_orientation_normal(library_path)
-            elif item.keep != "after":
-                errors.append(item.relative_path)
-                continue
+                if backup_path.exists():
+                    backup_path.unlink()
+                manual_review.add(item.relative_path)
+                done += 1
 
-            if backup_path.exists():
+            elif item.keep == "after":
+                if backup_path.exists():
+                    backup_path.unlink()
+                manual_review.add(item.relative_path)
+                done += 1
+
+            elif item.keep == "unresolved":
+                # Ni l'original ni la correction ne sont bons : on restaure
+                # l'original SANS rien déclarer de correct (pas de force EXIF,
+                # pas de manual_review) — le fichier reste éligible à un futur
+                # nouveau passage de détection.
+                if not backup_path.exists():
+                    errors.append(item.relative_path)
+                    continue
+                library_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(backup_path, library_path)
                 backup_path.unlink()
-            manual_review.add(item.relative_path)
-            done += 1
+                done += 1
+
+            else:
+                errors.append(item.relative_path)
         except Exception:
             errors.append(item.relative_path)
 
@@ -347,6 +365,7 @@ def resolve_gallery_batch(payload: GalleryResolveBatch):
 
 STATE_FILES = {
     "orientation_fix": ("processed_files", "orientation_fix.json"),
+    "orientation_fix_corrected": ("corrected_files", "orientation_fix.json"),
     "bloomin8_optimize": ("processed_asset_ids", "bloomin8_optimize.json"),
 }
 

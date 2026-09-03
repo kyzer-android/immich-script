@@ -222,8 +222,7 @@ def process_file(path: Path, library_root: Path, cfg: dict) -> tuple[bool, str |
     elif cfg["orientation"]["face_detection_fallback"]:
         angle = best_rotation_by_face_detection(path)
         if angle == -1:
-            log(SCRIPT_NAME, f"Aucun visage détecté, ignoré : {path}")
-            return False, None
+            return False, None  # aucun visage fiable / ambigu, silencieux (pas de bruit dans les logs)
         if angle == 0:
             return False, None  # déjà dans le bon sens, rien à faire
         method = f"face_detection({angle}°)"
@@ -320,7 +319,8 @@ def _main_body() -> None:
 
     formats = tuple(cfg["orientation"]["formats"])
     state = load_state(SCRIPT_NAME)
-    processed = state.setdefault("processed_files", {})  # path -> checksum traité
+    processed = state.setdefault("processed_files", {})  # path -> mtime traité (tous, pour le resume)
+    corrected = set(state.setdefault("corrected_files", []))  # uniquement les vraies corrections
     manual_review = set(state.get("manual_review", []))  # tranchés manuellement, jamais retraités
 
     log(SCRIPT_NAME, f"Comptage des fichiers à scanner dans {library_root}...")
@@ -353,6 +353,7 @@ def _main_body() -> None:
             was_modified, asset_id = process_file(path, library_root, cfg)
             if was_modified:
                 corrected_count += 1
+                corrected.add(rel)
             if asset_id:
                 modified_asset_ids.append(asset_id)
         except Exception as e:
@@ -360,8 +361,10 @@ def _main_body() -> None:
             continue
 
         processed[rel] = path.stat().st_mtime  # mtime post-modification
+        state["corrected_files"] = sorted(corrected)
 
         if scanned % PROGRESS_EVERY == 0:
+            save_state(SCRIPT_NAME, state)  # persiste régulièrement, pas seulement en fin de run
             log(SCRIPT_NAME, f"Progression : {scanned}/{total_files} scanné(s), {corrected_count} corrigé(s) jusqu'ici.")
 
     save_state(SCRIPT_NAME, state)

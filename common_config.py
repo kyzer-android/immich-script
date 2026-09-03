@@ -114,11 +114,22 @@ def save_state(name: str, state: dict) -> None:
     tmp_path.replace(path)
 
 
+LOG_LEVELS = {"INFO": 0, "WARN": 1, "ERROR": 2}
+PERSISTED_LOG_MIN_LEVEL = "WARN"  # seuls WARN/ERROR vont dans le fichier lu par le dashboard
+
+
 def log(script: str, message: str, level: str = "INFO") -> None:
-    """Log simple, fichier par script, lu ensuite par le dashboard."""
-    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    """Log simple, fichier par script, lu ensuite par le dashboard.
+
+    Tous les niveaux sont affichés en console (capturés intégralement dans
+    les logs cron bruts, utiles pour du debug approfondi en SSH), mais seuls
+    WARN/ERROR sont persistés dans le fichier lu par le dashboard, pour
+    éviter de le noyer sous des milliers de lignes INFO sans intérêt."""
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-    line = f"{ts} [{level}] {message}\n"
-    with open(LOG_DIR / f"{script}.log", "a", encoding="utf-8") as f:
-        f.write(line)
-    print(line, end="")
+    line = f"{ts} [{level}] {message}"
+    print(line)
+
+    if LOG_LEVELS.get(level, 0) >= LOG_LEVELS[PERSISTED_LOG_MIN_LEVEL]:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        with open(LOG_DIR / f"{script}.log", "a", encoding="utf-8") as f:
+            f.write(line + "\n")

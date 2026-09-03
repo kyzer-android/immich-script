@@ -62,6 +62,7 @@
     border-radius: 6px; display: block; background: #0a0b0d; border: 2px solid transparent;
   }
   .gallery-pair .images figure.selected img { border-color: var(--accent); }
+  .unresolved-btn.selected { border-color: var(--warn); color: var(--warn); }
   .gallery-pair .images figcaption { font-size: 0.75rem; color: var(--text-dim); margin-top: 4px; }
   .gallery-pair .path { font-size: 0.75rem; color: var(--text-dim); word-break: break-all; margin-bottom: 4px; }
   #gallery-validate-bar {
@@ -181,7 +182,8 @@
   <h2>📊 Fichiers déjà traités</h2>
   <div class="row">
     <select id="state-script">
-      <option value="orientation_fix">Correction d'orientation</option>
+      <option value="orientation_fix">Correction d'orientation — tous les fichiers vus</option>
+      <option value="orientation_fix_corrected">Correction d'orientation — corrigés uniquement</option>
       <option value="bloomin8_optimize">BLOOMIN8</option>
     </select>
     <button class="secondary" onclick="loadState()">Rafraîchir</button>
@@ -437,6 +439,7 @@ async function loadGallery() {
     const beforeUrl = `/api/gallery/before-raw/${encodeURIComponent(item.backup_id)}/${encodedPath}`;
     const afterUrl = `/api/gallery/after/${encodedPath}`;
     const current = gallerySelections[key];
+    const isUnresolved = current === 'unresolved';
 
     div.innerHTML = `
       <div class="path">${item.relative_path}</div>
@@ -450,6 +453,9 @@ async function loadGallery() {
           <figcaption>Corrigée</figcaption>
         </figure>
       </div>
+      <button class="secondary unresolved-btn ${isUnresolved ? 'selected' : ''}" data-key="${key}" style="margin-top:6px; font-size:0.78rem;">
+        ❓ Aucun des deux — laisser pour plus tard
+      </button>
     `;
     container.appendChild(div);
   });
@@ -462,6 +468,17 @@ async function loadGallery() {
       container.querySelectorAll(`figure[data-key="${key}"]`).forEach(f => {
         f.classList.toggle('selected', f.dataset.choice === choice);
       });
+      const unresolvedBtn = container.querySelector(`.unresolved-btn[data-key="${key}"]`);
+      if (unresolvedBtn) unresolvedBtn.classList.remove('selected');
+    });
+  });
+
+  container.querySelectorAll('.unresolved-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const key = btn.dataset.key;
+      gallerySelections[key] = 'unresolved';
+      btn.classList.add('selected');
+      container.querySelectorAll(`figure[data-key="${key}"]`).forEach(f => f.classList.remove('selected'));
     });
   });
 
