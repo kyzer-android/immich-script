@@ -15,6 +15,8 @@ import sys
 import threading
 from pathlib import Path
 
+import piexif
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -256,6 +258,23 @@ def gallery_after_image(relative_path: str):
     return FileResponse(path)
 
 
+def _force_exif_orientation_normal(path: Path) -> None:
+    """Force le tag EXIF Orientation à 1 (normal) SANS toucher aux pixels —
+    utilisé quand l'utilisateur juge manuellement que les pixels bruts sont
+    déjà dans le bon sens, pour empêcher les visionneuses de continuer à
+    appliquer une ancienne instruction de rotation EXIF."""
+    try:
+        exif_dict = piexif.load(str(path))
+    except Exception:
+        exif_dict = {"0th": {}, "Exif": {}, "GPS": {}, "Interop": {}, "1st": {}, "thumbnail": None}
+    try:
+        exif_dict["0th"][piexif.ImageIFD.Orientation] = 1
+        exif_bytes = piexif.dump(exif_dict)
+        piexif.insert(exif_bytes, str(path))
+    except Exception:
+        pass  # formats sans support EXIF (ex: PNG) : rien à faire, pas bloquant
+
+
 class GalleryResolveItem(BaseModel):
     backup_id: str
     relative_path: str
@@ -306,6 +325,7 @@ def resolve_gallery_batch(payload: GalleryResolveBatch):
                     continue
                 library_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(backup_path, library_path)
+                _force_exif_orientation_normal(library_path)
             elif item.keep != "after":
                 errors.append(item.relative_path)
                 continue
