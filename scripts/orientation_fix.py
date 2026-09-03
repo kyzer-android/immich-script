@@ -194,6 +194,7 @@ def process_file(path: Path, library_root: Path, cfg: dict) -> tuple[bool, str |
     if exif_orientation and exif_orientation != 1:
         method = f"exif({exif_orientation})"
         img = Image.open(path)
+        icc_profile = img.info.get("icc_profile")
         img = rotate_by_exif_value(img, exif_orientation)
     elif cfg["orientation"]["face_detection_fallback"]:
         angle = best_rotation_by_face_detection(path)
@@ -204,6 +205,7 @@ def process_file(path: Path, library_root: Path, cfg: dict) -> tuple[bool, str |
             return False, None  # déjà dans le bon sens, rien à faire
         method = f"face_detection({angle}°)"
         img = Image.open(path)
+        icc_profile = img.info.get("icc_profile")
         img = rotate_by_angle(img, angle)
     else:
         return False, None
@@ -222,6 +224,8 @@ def process_file(path: Path, library_root: Path, cfg: dict) -> tuple[bool, str |
     save_kwargs = {"quality": 95}
     if exif_bytes:
         save_kwargs["exif"] = exif_bytes
+    if icc_profile:
+        save_kwargs["icc_profile"] = icc_profile
     img.save(path, **save_kwargs)
 
     log(SCRIPT_NAME, f"Corrigé ({method}) : {path}")
