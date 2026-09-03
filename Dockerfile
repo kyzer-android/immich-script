@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     cron \
     curl \
     gnupg \
+    git \
     libheif1 \
     libheif-dev \
     libgl1 \
