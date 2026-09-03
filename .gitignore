@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Node.js
+node_modules/
+npm-debug.log
+
+# Environnement / secrets
+.env
+
+# Données runtime (ne doivent jamais être versionnées)
+data/
+*.log
+
+# OS / éditeurs
+.DS_Store
+.vscode/
+.idea/

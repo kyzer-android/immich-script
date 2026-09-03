@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Immich Scripts — Dashboard</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --border: #2a2f3a;
+    --text: #e6e8eb;
+    --text-dim: #9aa1ac;
+    --accent: #4f8cff;
+    --danger: #ff5f5f;
+    --success: #3ecf8e;
+    --warn: #f5b942;
+    --radius: 10px;
+    --spacing: 16px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 0;
+    padding: var(--spacing);
+  }
+  h1 { font-size: 1.4rem; margin-bottom: var(--spacing); }
+  h2 { font-size: 1.1rem; margin: 0 0 12px; color: var(--text); }
+  .tabs { display: flex; gap: 8px; margin-bottom: var(--spacing); flex-wrap: wrap; }
+  .tab-btn {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text-dim);
+    padding: 8px 14px; border-radius: var(--radius); cursor: pointer; font-size: 0.9rem;
+  }
+  .tab-btn.active { color: var(--text); border-color: var(--accent); background: #1a2436; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: var(--spacing); margin-bottom: var(--spacing); display: none;
+  }
+  .panel.active { display: block; }
+  label { display: block; font-size: 0.85rem; color: var(--text-dim); margin: 12px 0 4px; }
+  input[type=text], input[type=number], select {
+    width: 100%; background: #0f1115; border: 1px solid var(--border); color: var(--text);
+    padding: 8px 10px; border-radius: 6px; font-size: 0.9rem;
+  }
+  input[type=checkbox] { transform: scale(1.2); margin-right: 6px; }
+  button {
+    background: var(--accent); color: white; border: none; padding: 9px 16px;
+    border-radius: 6px; cursor: pointer; font-size: 0.9rem; margin-top: var(--spacing);
+  }
+  button.secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+  button.danger { background: var(--danger); }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .link-item { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+  .backup-item, .log-line { font-size: 0.82rem; border-bottom: 1px solid var(--border); padding: 6px 0; }
+  .log-line.WARN { color: var(--warn); }
+  .log-line.ERROR { color: var(--danger); }
+  #log-output { max-height: 400px; overflow-y: auto; font-family: monospace; }
+  .status-msg { padding: 10px; border-radius: 8px; margin-bottom: 12px; display: none; }
+  .status-msg.ok { display: block; background: #14301f; color: var(--success); }
+  .status-msg.error { display: block; background: #351616; color: var(--danger); }
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6); display: none;
+    align-items: center; justify-content: center; z-index: 10;
+  }
+  .modal-backdrop.active { display: flex; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; max-width: 400px; }
+</style>
+</head>
+<body>
+
+<h1>📷 Immich Scripts — Dashboard</h1>
+
+<div class="tabs">
+  <button class="tab-btn active" data-tab="config">Configuration</button>
+  <button class="tab-btn" data-tab="backups">Backups</button>
+  <button class="tab-btn" data-tab="logs">Logs</button>
+  <button class="tab-btn" data-tab="gallery">Galerie avant/après</button>
+</div>
+
+<div id="status" class="status-msg"></div>
+
+<!-- ===== CONFIGURATION ===== -->
+<div class="panel active" id="panel-config">
+
+  <h2>🔑 Connexion Immich</h2>
+  <label>Serveur</label>
+  <input type="text" id="immich_server">
+  <label>Clé API</label>
+  <input type="text" id="immich_api_key">
+
+  <hr style="border-color: var(--border); margin: 20px 0;">
+
+  <h2>🔄 Correction d'orientation</h2>
+  <div class="row"><input type="checkbox" id="orientation_enabled"> <span>Activé</span></div>
+  <label>Planification (cron)</label>
+  <input type="text" id="orientation_schedule" placeholder="0 3 * * *">
+  <label>Chemin bibliothèque</label>
+  <input type="text" id="orientation_library_path">
+  <label>Rétention des backups (jours)</label>
+  <input type="number" id="orientation_backup_retention">
+  <div class="row"><input type="checkbox" id="orientation_face_fallback"> <span>Fallback détection de visage</span></div>
+
+  <hr style="border-color: var(--border); margin: 20px 0;">
+
+  <h2>👤 Person → Album</h2>
+  <div class="row"><input type="checkbox" id="p2a_enabled"> <span>Activé</span></div>
+  <label>Planification (cron)</label>
+  <input type="text" id="p2a_schedule" placeholder="*/30 * * * *">
+  <label>Liens personne → album</label>
+  <div id="p2a-links"></div>
+  <button class="secondary" onclick="addLinkRow()">+ Ajouter un lien</button>
+
+  <hr style="border-color: var(--border); margin: 20px 0;">
+
+  <h2>🖼️ BLOOMIN8</h2>
+  <div class="row"><input type="checkbox" id="bloomin8_enabled"> <span>Activé</span></div>
+  <label>Planification (cron)</label>
+  <input type="text" id="bloomin8_schedule" placeholder="0 4 * * *">
+  <label>Album source (ID)</label>
+  <input type="text" id="bloomin8_album_id">
+  <label>Orientation cible</label>
+  <select id="bloomin8_orientation">
+    <option value="portrait">Portrait</option>
+    <option value="landscape">Paysage</option>
+  </select>
+  <label>Dossier de destination (partagé NFS)</label>
+  <input type="text" id="bloomin8_dest_path">
+
+  <button onclick="saveConfig()">💾 Enregistrer la configuration</button>
+</div>
+
+<!-- ===== BACKUPS ===== -->
+<div class="panel" id="panel-backups">
+  <h2>🗂️ Points de backup</h2>
+  <div id="backups-list"></div>
+  <button class="danger" onclick="purgeBackups()">Tout supprimer</button>
+</div>
+
+<!-- ===== LOGS ===== -->
+<div class="panel" id="panel-logs">
+  <h2>📜 Journaux d'exécution</h2>
+  <div class="row">
+    <select id="log-script">
+      <option value="orientation_fix">Correction d'orientation</option>
+      <option value="person_to_album">Person → Album</option>
+      <option value="bloomin8_optimize">BLOOMIN8</option>
+    </select>
+    <button class="secondary" onclick="loadLogs()">Rafraîchir</button>
+  </div>
+  <div id="log-output"></div>
+</div>
+
+<!-- ===== GALERIE ===== -->
+<div class="panel" id="panel-gallery">
+  <h2>🖼️ Fichiers traités (backups disponibles)</h2>
+  <div id="gallery-list"></div>
+</div>
+
+<!-- ===== MODALE : décision garder/vider ===== -->
+<div class="modal-backdrop" id="album-modal">
+  <div class="modal">
+    <h2>Album BLOOMIN8 modifié</h2>
+    <p>L'orientation reste inchangée. Que faire du contenu actuel du dossier de destination ?</p>
+    <div class="row">
+      <button onclick="confirmAlbumChange('keep')">Conserver</button>
+      <button class="danger" onclick="confirmAlbumChange('clear')">Vider</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let currentConfig = null;
+
+function showStatus(msg, ok = true) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'status-msg ' + (ok ? 'ok' : 'error');
+  setTimeout(() => { el.className = 'status-msg'; }, 4000);
+}
+
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+    if (btn.dataset.tab === 'backups') loadBackups();
+    if (btn.dataset.tab === 'logs') loadLogs();
+    if (btn.dataset.tab === 'gallery') loadGallery();
+  });
+});
+
+async function loadConfig() {
+  const resp = await fetch('/api/config');
+  currentConfig = await resp.json();
+  const c = currentConfig;
+
+  document.getElementById('immich_server').value = c.immich.server;
+  document.getElementById('immich_api_key').value = c.immich.api_key;
+
+  document.getElementById('orientation_enabled').checked = c.orientation.enabled;
+  document.getElementById('orientation_schedule').value = c.orientation.schedule;
+  document.getElementById('orientation_library_path').value = c.orientation.library_path;
+  document.getElementById('orientation_backup_retention').value = c.orientation.backup_retention_days;
+  document.getElementById('orientation_face_fallback').checked = c.orientation.face_detection_fallback;
+
+  document.getElementById('p2a_enabled').checked = c.person_to_album.enabled;
+  document.getElementById('p2a_schedule').value = c.person_to_album.schedule;
+  renderLinks(c.person_to_album.links);
+
+  document.getElementById('bloomin8_enabled').checked = c.bloomin8.enabled;
+  document.getElementById('bloomin8_schedule').value = c.bloomin8.schedule;
+  document.getElementById('bloomin8_album_id').value = c.bloomin8.album_id;
+  document.getElementById('bloomin8_orientation').value = c.bloomin8.orientation;
+  document.getElementById('bloomin8_dest_path').value = c.bloomin8.destination_path;
+}
+
+function renderLinks(links) {
+  const container = document.getElementById('p2a-links');
+  container.innerHTML = '';
+  links.forEach((link, idx) => {
+    const div = document.createElement('div');
+    div.className = 'link-item';
+    div.innerHTML = `
+      <label>Description</label>
+      <input type="text" data-idx="${idx}" data-field="description" value="${link.description || ''}">
+      <label>Person ID</label>
+      <input type="text" data-idx="${idx}" data-field="personId" value="${link.personId || ''}">
+      <label>Album ID</label>
+      <input type="text" data-idx="${idx}" data-field="albumId" value="${link.albumId || ''}">
+      <button class="secondary danger" onclick="removeLinkRow(${idx})">Supprimer ce lien</button>
+    `;
+    container.appendChild(div);
+  });
+}
+
+function addLinkRow() {
+  currentConfig.person_to_album.links.push({ description: '', personId: '', albumId: '' });
+  renderLinks(currentConfig.person_to_album.links);
+}
+
+function removeLinkRow(idx) {
+  currentConfig.person_to_album.links.splice(idx, 1);
+  renderLinks(currentConfig.person_to_album.links);
+}
+
+function collectLinksFromDOM() {
+  const links = [];
+  document.querySelectorAll('#p2a-links .link-item').forEach(item => {
+    const link = {};
+    item.querySelectorAll('input').forEach(input => {
+      link[input.dataset.field] = input.value;
+    });
+    links.push(link);
+  });
+  return links;
+}
+
+async function saveConfig() {
+  const c = currentConfig;
+  c.immich.server = document.getElementById('immich_server').value;
+  c.immich.api_key = document.getElementById('immich_api_key').value;
+
+  c.orientation.enabled = document.getElementById('orientation_enabled').checked;
+  c.orientation.schedule = document.getElementById('orientation_schedule').value;
+  c.orientation.library_path = document.getElementById('orientation_library_path').value;
+  c.orientation.backup_retention_days = parseInt(document.getElementById('orientation_backup_retention').value, 10);
+  c.orientation.face_detection_fallback = document.getElementById('orientation_face_fallback').checked;
+
+  c.person_to_album.enabled = document.getElementById('p2a_enabled').checked;
+  c.person_to_album.schedule = document.getElementById('p2a_schedule').value;
+  c.person_to_album.links = collectLinksFromDOM();
+
+  c.bloomin8.enabled = document.getElementById('bloomin8_enabled').checked;
+  c.bloomin8.schedule = document.getElementById('bloomin8_schedule').value;
+  c.bloomin8.album_id = document.getElementById('bloomin8_album_id').value;
+  c.bloomin8.orientation = document.getElementById('bloomin8_orientation').value;
+  c.bloomin8.destination_path = document.getElementById('bloomin8_dest_path').value;
+
+  const resp = await fetch('/api/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ config: c }),
+  });
+  const data = await resp.json();
+
+  if (data.status === 'confirmation_required') {
+    document.getElementById('album-modal').classList.add('active');
+  } else {
+    showStatus('Configuration enregistrée.');
+    loadConfig();
+  }
+}
+
+async function confirmAlbumChange(action) {
+  document.getElementById('album-modal').classList.remove('active');
+  await fetch('/api/bloomin8/confirm-album-change', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action }),
+  });
+  showStatus(action === 'clear' ? 'Le dossier sera vidé au prochain run.' : 'Le contenu existant sera conservé.');
+  loadConfig();
+}
+
+async function loadBackups() {
+  const resp = await fetch('/api/backups');
+  const backups = await resp.json();
+  const container = document.getElementById('backups-list');
+  container.innerHTML = backups.length === 0 ? '<p>Aucun backup.</p>' : '';
+  backups.forEach(b => {
+    const sizeMb = (b.size_bytes / (1024 * 1024)).toFixed(1);
+    const div = document.createElement('div');
+    div.className = 'backup-item row';
+    div.innerHTML = `
+      <span style="flex:1">${b.id} — ${b.file_count} fichier(s), ${sizeMb} Mo</span>
+      <button class="secondary danger" onclick="deleteBackup('${b.id}')">Supprimer</button>
+    `;
+    container.appendChild(div);
+  });
+}
+
+async function deleteBackup(id) {
+  await fetch('/api/backups/' + id, { method: 'DELETE' });
+  loadBackups();
+}
+
+async function purgeBackups() {
+  if (!confirm('Supprimer TOUS les backups ?')) return;
+  await fetch('/api/backups', { method: 'DELETE' });
+  loadBackups();
+}
+
+async function loadLogs() {
+  const script = document.getElementById('log-script').value;
+  const resp = await fetch(`/api/logs/${script}?lines=300`);
+  const data = await resp.json();
+  const container = document.getElementById('log-output');
+  container.innerHTML = '';
+  data.lines.forEach(line => {
+    const div = document.createElement('div');
+    let level = 'INFO';
+    if (line.includes('[WARN]')) level = 'WARN';
+    if (line.includes('[ERROR]')) level = 'ERROR';
+    div.className = 'log-line ' + level;
+    div.textContent = line;
+    container.appendChild(div);
+  });
+  container.scrollTop = container.scrollHeight;
+}
+
+async function loadGallery() {
+  const resp = await fetch('/api/gallery');
+  const items = await resp.json();
+  const container = document.getElementById('gallery-list');
+  container.innerHTML = items.length === 0 ? '<p>Aucun élément.</p>' : '';
+  items.forEach(item => {
+    const div = document.createElement('div');
+    div.className = 'backup-item';
+    div.textContent = `[${item.backup_id}] ${item.relative_path}`;
+    container.appendChild(div);
+  });
+}
+
+document.getElementById('log-script').addEventListener('change', loadLogs);
+
+loadConfig();
+</script>
+</body>
+</html>

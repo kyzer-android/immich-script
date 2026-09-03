@@ -1,0 +1,12 @@
+{
+  "name": "immich-scripts-bloomin8",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Optimiseur d'images Spectra 6 pour cadre BLOOMIN8, alimenté depuis un album Immich",
+  "type": "commonjs",
+  "dependencies": {
+    "epdoptimize": "^1.0.0",
+    "canvas": "^2.11.2",
+    "node-fetch": "^2.7.0"
+  }
+}

@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  immich-scripts:
+    build: .
+    # Une fois l'image publiée sur ton registre ou buildée localement sur la VM :
+    # image: immich-scripts:latest
+    container_name: immich-scripts
+    restart: always
+    ports:
+      - "8080:8080"  # Dashboard — à mettre derrière Nginx Proxy Manager si besoin
+    volumes:
+      # Données persistantes du conteneur (config, state, backups, logs)
+      - ${IMMICH_SCRIPTS_DATA}:/data
+      # Bibliothèque Immich, en LECTURE-ÉCRITURE pour la correction d'orientation in-place
+      - ${IMMICH_LIBRARY_PATH}:/immich-library
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      # Valeurs par défaut au TOUT PREMIER démarrage uniquement.
+      # Ensuite, tout se pilote depuis le dashboard (http://<IP>:8080).
+      IMMICH_SERVER: "${IMMICH_SERVER}"
+      IMMICH_API_KEY: "${IMMICH_API_KEY}"
+      ORIENTATION_SCHEDULE: "0 3 * * *"
+      ORIENTATION_LIBRARY_PATH: "/immich-library"
+      BACKUP_RETENTION_DAYS: "30"
+      PERSON_TO_ALBUM_SCHEDULE: "*/30 * * * *"
+      BLOOMIN8_SCHEDULE: "0 4 * * *"
+      BLOOMIN8_ALBUM_ID: "04bca25d-8c6e-40e3-8ba0-e9e759bf7bbb"
+      BLOOMIN8_ORIENTATION: "portrait"
+      BLOOMIN8_DEST_PATH: "/data/bloomin8-share"
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
