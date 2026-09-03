@@ -27,6 +27,7 @@ DEFAULT_CONFIG = {
         "enabled": True,
         "schedule": os.environ.get("ORIENTATION_SCHEDULE", "0 3 * * *"),
         "library_path": os.environ.get("ORIENTATION_LIBRARY_PATH", "/immich-library"),
+        "user_id": os.environ.get("ORIENTATION_USER_ID", ""),  # optionnel : limite au sous-dossier de cet utilisateur Immich
         "backup_retention_days": int(os.environ.get("BACKUP_RETENTION_DAYS", "30")),
         "face_detection_fallback": True,
         "formats": [".jpg", ".jpeg", ".heic", ".heif", ".png"],

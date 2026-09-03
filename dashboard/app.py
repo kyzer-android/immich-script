@@ -208,6 +208,9 @@ def gallery_after_image(relative_path: str):
         raise HTTPException(400, "Chemin invalide")
     cfg = load_config()
     library_root = Path(cfg["orientation"]["library_path"])
+    user_id = cfg["orientation"].get("user_id", "").strip()
+    if user_id:
+        library_root = library_root / user_id
     path = library_root / relative_path
     if not path.exists() or not path.is_file():
         raise HTTPException(404, "Image introuvable (peut-être déplacée/supprimée depuis)")
@@ -236,6 +239,9 @@ def resolve_gallery_batch(payload: GalleryResolveBatch):
     la décision de l'utilisateur est définitive."""
     cfg = load_config()
     library_root = Path(cfg["orientation"]["library_path"])
+    user_id = cfg["orientation"].get("user_id", "").strip()
+    if user_id:
+        library_root = library_root / user_id
 
     state_path = STATE_DIR / "orientation_fix.json"
     state = {}

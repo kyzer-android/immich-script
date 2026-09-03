@@ -245,6 +245,11 @@ def main() -> None:
         return
 
     library_root = Path(cfg["orientation"]["library_path"])
+    user_id = cfg["orientation"].get("user_id", "").strip()
+    if user_id:
+        library_root = library_root / user_id
+        log(SCRIPT_NAME, f"Scan restreint à l'utilisateur {user_id} : {library_root}")
+
     if not library_root.exists():
         log(SCRIPT_NAME, f"Chemin bibliothèque introuvable : {library_root}", "ERROR")
         return
@@ -254,13 +259,17 @@ def main() -> None:
     processed = state.setdefault("processed_files", {})  # path -> checksum traité
     manual_review = set(state.get("manual_review", []))  # tranchés manuellement, jamais retraités
 
+    log(SCRIPT_NAME, f"Comptage des fichiers à scanner dans {library_root}...")
+    all_files = [p for p in library_root.rglob("*") if p.is_file() and p.suffix.lower() in formats]
+    total_files = len(all_files)
+    log(SCRIPT_NAME, f"{total_files} fichier(s) au total à examiner.")
+
     modified_asset_ids: list[str] = []
     corrected_count = 0
     scanned = 0
+    PROGRESS_EVERY = 50
 
-    for path in library_root.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in formats:
-            continue
+    for path in all_files:
         scanned += 1
         rel = str(path.relative_to(library_root))
         mtime = path.stat().st_mtime
@@ -282,6 +291,9 @@ def main() -> None:
             continue
 
         processed[rel] = path.stat().st_mtime  # mtime post-modification
+
+        if scanned % PROGRESS_EVERY == 0:
+            log(SCRIPT_NAME, f"Progression : {scanned}/{total_files} scanné(s), {corrected_count} corrigé(s) jusqu'ici.")
 
     save_state(SCRIPT_NAME, state)
     cleanup_old_backups(cfg["orientation"]["backup_retention_days"])
