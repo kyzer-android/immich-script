@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gnupg \
     git \
+    tzdata \
     libheif1 \
     libheif-dev \
     libgl1 \
