@@ -248,6 +248,7 @@ def main() -> None:
     formats = tuple(cfg["orientation"]["formats"])
     state = load_state(SCRIPT_NAME)
     processed = state.setdefault("processed_files", {})  # path -> checksum traité
+    manual_review = set(state.get("manual_review", []))  # tranchés manuellement, jamais retraités
 
     modified_asset_ids: list[str] = []
     corrected_count = 0
@@ -259,6 +260,9 @@ def main() -> None:
         scanned += 1
         rel = str(path.relative_to(library_root))
         mtime = path.stat().st_mtime
+
+        if rel in manual_review:
+            continue  # décision tranchée manuellement via le dashboard, jamais retraité
 
         if processed.get(rel) == mtime:
             continue  # déjà traité et inchangé depuis

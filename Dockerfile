@@ -30,6 +30,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
+# Fuseau horaire configuré en dur au build (ne dépend pas des variables
+# d'environnement du docker-compose, qui peuvent ne pas être transmises
+# selon la configuration Portainer). Modifiable en éditant cette ligne
+# et en rebuild si besoin.
+ENV TZ=Europe/Paris
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
 WORKDIR /app
 
 # --- Dépendances Python ---

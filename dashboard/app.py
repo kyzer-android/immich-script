@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 sys.path.insert(0, "/app")
-from common_config import load_config, save_config, LOG_DIR, BACKUP_DIR, DATA_DIR
+from common_config import load_config, save_config, LOG_DIR, BACKUP_DIR, DATA_DIR, STATE_DIR
 
 app = FastAPI(title="Immich Scripts Dashboard")
 
@@ -139,28 +139,14 @@ def run_script_status(script_name: str):
 @app.get("/api/backups")
 def list_backups():
     if not BACKUP_DIR.exists():
-        return []
-    result = []
-    for entry in sorted(BACKUP_DIR.iterdir(), reverse=True):
-        if not entry.is_dir():
-            continue
-        size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file())
-        file_count = sum(1 for f in entry.rglob("*") if f.is_file())
-        result.append({
-            "id": entry.name,
-            "size_bytes": size,
-            "file_count": file_count,
-        })
-    return result
-
-
-@app.delete("/api/backups/{backup_id}")
-def delete_backup(backup_id: str):
-    target = BACKUP_DIR / backup_id
-    if not target.exists() or not target.is_dir() or ".." in backup_id:
-        raise HTTPException(404, "Backup introuvable")
-    shutil.rmtree(target)
-    return {"status": "deleted"}
+        return {"folder_count": 0, "file_count": 0, "size_bytes": 0}
+    folders = [e for e in BACKUP_DIR.iterdir() if e.is_dir()]
+    all_files = [f for e in folders for f in e.rglob("*") if f.is_file()]
+    return {
+        "folder_count": len(folders),
+        "file_count": len(all_files),
+        "size_bytes": sum(f.stat().st_size for f in all_files),
+    }
 
 
 @app.delete("/api/backups")
@@ -226,6 +212,72 @@ def gallery_after_image(relative_path: str):
     if not path.exists() or not path.is_file():
         raise HTTPException(404, "Image introuvable (peut-être déplacée/supprimée depuis)")
     return FileResponse(path)
+
+
+class GalleryResolveItem(BaseModel):
+    backup_id: str
+    relative_path: str
+    keep: str  # "before" (restaure l'original) ou "after" (garde la correction)
+
+
+class GalleryResolveBatch(BaseModel):
+    items: list[GalleryResolveItem]
+
+
+@app.post("/api/gallery/resolve")
+def resolve_gallery_batch(payload: GalleryResolveBatch):
+    """Applique en masse les choix garder/supprimer de la galerie avant/après.
+
+    - keep="after"  : la version corrigée reste en place, le backup est supprimé.
+    - keep="before" : l'original est restauré dans la bibliothèque, le backup est supprimé.
+
+    Dans les deux cas, le fichier est marqué en "manual_review" dans l'état
+    d'orientation_fix pour qu'il ne soit plus jamais retraité automatiquement —
+    la décision de l'utilisateur est définitive."""
+    cfg = load_config()
+    library_root = Path(cfg["orientation"]["library_path"])
+
+    state_path = STATE_DIR / "orientation_fix.json"
+    state = {}
+    if state_path.exists():
+        with open(state_path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    manual_review = set(state.get("manual_review", []))
+
+    done, errors = 0, []
+
+    for item in payload.items:
+        if ".." in item.backup_id or ".." in item.relative_path:
+            errors.append(item.relative_path)
+            continue
+
+        backup_path = BACKUP_DIR / item.backup_id / item.relative_path
+        library_path = library_root / item.relative_path
+
+        try:
+            if item.keep == "before":
+                if not backup_path.exists():
+                    errors.append(item.relative_path)
+                    continue
+                library_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(backup_path, library_path)
+            elif item.keep != "after":
+                errors.append(item.relative_path)
+                continue
+
+            if backup_path.exists():
+                backup_path.unlink()
+            manual_review.add(item.relative_path)
+            done += 1
+        except Exception:
+            errors.append(item.relative_path)
+
+    state["manual_review"] = sorted(manual_review)
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+
+    return {"resolved": done, "errors": errors}
 
 
 STATE_FILES = {

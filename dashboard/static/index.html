@@ -56,10 +56,18 @@
   .backup-item, .log-line { font-size: 0.82rem; border-bottom: 1px solid var(--border); padding: 6px 0; }
   .gallery-pair { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 12px; }
   .gallery-pair .images { display: flex; gap: 8px; margin-top: 8px; }
-  .gallery-pair .images figure { flex: 1; margin: 0; text-align: center; }
-  .gallery-pair .images img { width: 100%; border-radius: 6px; display: block; background: #0a0b0d; }
+  .gallery-pair .images figure { flex: 1; margin: 0; text-align: center; cursor: pointer; }
+  .gallery-pair .images img {
+    width: 100%; max-width: 140px; aspect-ratio: 1; object-fit: cover;
+    border-radius: 6px; display: block; background: #0a0b0d; border: 2px solid transparent;
+  }
+  .gallery-pair .images figure.selected img { border-color: var(--accent); }
   .gallery-pair .images figcaption { font-size: 0.75rem; color: var(--text-dim); margin-top: 4px; }
-  .gallery-pair .path { font-size: 0.78rem; color: var(--text-dim); word-break: break-all; }
+  .gallery-pair .path { font-size: 0.75rem; color: var(--text-dim); word-break: break-all; margin-bottom: 4px; }
+  #gallery-validate-bar {
+    position: sticky; bottom: 0; background: var(--panel); border-top: 1px solid var(--border);
+    padding: 12px; margin-top: 12px; display: flex; justify-content: space-between; align-items: center;
+  }
   .log-line.WARN { color: var(--warn); }
   .log-line.ERROR { color: var(--danger); }
   #log-output { max-height: 400px; overflow-y: auto; font-family: monospace; }
@@ -145,7 +153,11 @@
 <!-- ===== BACKUPS ===== -->
 <div class="panel" id="panel-backups">
   <h2>🗂️ Points de backup</h2>
-  <div id="backups-list"></div>
+  <p id="backups-summary" style="font-size: 1rem; color: var(--text-dim);"></p>
+  <p style="font-size: 0.85rem; color: var(--text-dim);">
+    Pour choisir individuellement quoi garder (original ou version corrigée), utilise l'onglet
+    <strong>Galerie avant/après</strong>. Ce bouton supprime TOUT sans distinction.
+  </p>
   <button class="danger" onclick="purgeBackups()">Tout supprimer</button>
 </div>
 
@@ -179,8 +191,15 @@
 
 <!-- ===== GALERIE ===== -->
 <div class="panel" id="panel-gallery">
-  <h2>🖼️ Fichiers traités (backups disponibles)</h2>
+  <h2>🖼️ Photos corrigées — choisis quoi garder</h2>
+  <p style="font-size: 0.85rem; color: var(--text-dim);">
+    Clique sur la vignette à conserver pour chaque paire (par défaut : la version corrigée). Rien à faire pour les paires qui te vont — elles seront validées avec le choix par défaut.
+  </p>
   <div id="gallery-list"></div>
+  <div id="gallery-validate-bar">
+    <span id="gallery-count-label"></span>
+    <button onclick="validateGallery()">✅ Valider les choix</button>
+  </div>
 </div>
 
 <!-- ===== MODALE : décision garder/vider ===== -->
@@ -333,24 +352,10 @@ async function confirmAlbumChange(action) {
 
 async function loadBackups() {
   const resp = await fetch('/api/backups');
-  const backups = await resp.json();
-  const container = document.getElementById('backups-list');
-  container.innerHTML = backups.length === 0 ? '<p>Aucun backup.</p>' : '';
-  backups.forEach(b => {
-    const sizeMb = (b.size_bytes / (1024 * 1024)).toFixed(1);
-    const div = document.createElement('div');
-    div.className = 'backup-item row';
-    div.innerHTML = `
-      <span style="flex:1">${b.id} — ${b.file_count} fichier(s), ${sizeMb} Mo</span>
-      <button class="secondary danger" onclick="deleteBackup('${b.id}')">Supprimer</button>
-    `;
-    container.appendChild(div);
-  });
-}
-
-async function deleteBackup(id) {
-  await fetch('/api/backups/' + id, { method: 'DELETE' });
-  loadBackups();
+  const data = await resp.json();
+  const sizeMb = (data.size_bytes / (1024 * 1024)).toFixed(1);
+  document.getElementById('backups-summary').textContent =
+    `${data.folder_count} run(s) de backup, ${data.file_count} fichier(s), ${sizeMb} Mo au total.`;
 }
 
 async function purgeBackups() {
@@ -377,31 +382,80 @@ async function loadLogs() {
   container.scrollTop = container.scrollHeight;
 }
 
+let gallerySelections = {}; // "backup_id|relative_path" -> "before" | "after"
+
+function galleryKey(item) {
+  return `${item.backup_id}|${item.relative_path}`;
+}
+
 async function loadGallery() {
   const resp = await fetch('/api/gallery');
   const items = await resp.json();
   const container = document.getElementById('gallery-list');
-  container.innerHTML = items.length === 0 ? '<p>Aucun élément.</p>' : '';
+  container.innerHTML = items.length === 0 ? '<p>Aucune photo corrigée pour le moment.</p>' : '';
+  gallerySelections = {};
+
   items.forEach(item => {
+    const key = galleryKey(item);
+    gallerySelections[key] = 'after'; // par défaut : on garde la version corrigée
+
     const div = document.createElement('div');
     div.className = 'gallery-pair';
-    const beforeUrl = `/api/gallery/before/${encodeURIComponent(item.backup_id)}/${item.relative_path.split('/').map(encodeURIComponent).join('/')}`;
-    const afterUrl = `/api/gallery/after/${item.relative_path.split('/').map(encodeURIComponent).join('/')}`;
+    const encodedPath = item.relative_path.split('/').map(encodeURIComponent).join('/');
+    const beforeUrl = `/api/gallery/before/${encodeURIComponent(item.backup_id)}/${encodedPath}`;
+    const afterUrl = `/api/gallery/after/${encodedPath}`;
+
     div.innerHTML = `
-      <div class="path">[${item.backup_id}] ${item.relative_path}</div>
+      <div class="path">${item.relative_path}</div>
       <div class="images">
-        <figure>
-          <img src="${beforeUrl}" loading="lazy" onerror="this.style.opacity=0.2">
-          <figcaption>Avant</figcaption>
+        <figure data-key="${key}" data-choice="before">
+          <img src="${beforeUrl}" loading="lazy" onerror="this.style.opacity=0.15">
+          <figcaption>Original</figcaption>
         </figure>
-        <figure>
-          <img src="${afterUrl}" loading="lazy" onerror="this.style.opacity=0.2">
-          <figcaption>Après</figcaption>
+        <figure data-key="${key}" data-choice="after" class="selected">
+          <img src="${afterUrl}" loading="lazy" onerror="this.style.opacity=0.15">
+          <figcaption>Corrigée</figcaption>
         </figure>
       </div>
     `;
     container.appendChild(div);
   });
+
+  container.querySelectorAll('figure').forEach(fig => {
+    fig.addEventListener('click', () => {
+      const key = fig.dataset.key;
+      const choice = fig.dataset.choice;
+      gallerySelections[key] = choice;
+      container.querySelectorAll(`figure[data-key="${key}"]`).forEach(f => {
+        f.classList.toggle('selected', f.dataset.choice === choice);
+      });
+    });
+  });
+
+  document.getElementById('gallery-count-label').textContent = `${items.length} paire(s) à valider`;
+}
+
+async function validateGallery() {
+  const items = Object.entries(gallerySelections).map(([key, keep]) => {
+    const [backup_id, ...pathParts] = key.split('|');
+    return { backup_id, relative_path: pathParts.join('|'), keep };
+  });
+
+  if (items.length === 0) {
+    showStatus('Rien à valider.');
+    return;
+  }
+  if (!confirm(`Valider ${items.length} choix ? Les backups non conservés seront supprimés définitivement.`)) return;
+
+  const resp = await fetch('/api/gallery/resolve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items }),
+  });
+  const data = await resp.json();
+  showStatus(`${data.resolved} choix appliqué(s).` + (data.errors.length ? ` ${data.errors.length} erreur(s).` : ''));
+  loadGallery();
+  loadBackups();
 }
 
 async function runScript(scriptName) {
