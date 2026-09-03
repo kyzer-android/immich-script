@@ -32,11 +32,14 @@ Au premier lancement, `/data/config/config.json` est créé à partir des variab
 
 ## Partage NFS vers HAOS (pour BLOOMIN8)
 
-Le dossier `${IMMICH_SCRIPTS_DATA}/bloomin8-share` (mappé sur `/data/bloomin8-share` dans le conteneur) doit être exposé en NFS à la VM HAOS :
+Le dossier `BLOOMIN8_SHARE_PATH` (monté sur `/data/bloomin8-share` dans le conteneur) doit vivre sur le RAID, pas sur le disque local de la VM — c'est le seul moyen pour le host Proxmox de l'exporter en NFS vers HAOS :
 
-1. Sur le host Proxmox, étendre `/etc/exports` pour autoriser l'IP de HAOS sur ce chemin.
-2. Dans HAOS : `Paramètres → Système → Stockage → Ajouter un stockage réseau` (type NFS), pointer vers ce chemin.
-3. Configurer l'intégration `bloomin8_pull` avec `image_dir` pointant vers ce point de montage.
+1. Sur le host Proxmox, créer le dossier sous `/mnt/raid_usb/docker-data/bloomin8-share` (chemin qui doit correspondre à ce que voit `BLOOMIN8_SHARE_PATH` côté VM Docker, via le mount NFS déjà en place).
+2. Étendre `/etc/exports` pour autoriser l'IP de HAOS (`192.168.1.215`) sur ce chemin, puis `exportfs -ra`.
+3. Dans HAOS : `Paramètres → Système → Stockage → Ajouter un stockage réseau` (type NFS), pointer vers ce chemin.
+4. Configurer l'intégration `bloomin8_pull` avec `image_dir` pointant vers ce point de montage.
+
+La config, l'état, les backups et les logs (`IMMICH_SCRIPTS_DATA`) restent eux sur le disque local de la VM Docker, comme le reste de tes confs applicatives — seule la donnée réellement partagée (les photos du cadre) vit sur le RAID.
 
 ## Comportement de reconstruction BLOOMIN8
 

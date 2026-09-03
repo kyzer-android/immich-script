@@ -184,8 +184,8 @@ def trigger_immich_jobs(server: str, api_key: str, asset_ids: list[str]) -> None
             log(SCRIPT_NAME, f"Erreur job {job_name} : {e}", "WARN")
 
 
-def process_file(path: Path, library_root: Path, cfg: dict) -> str | None:
-    """Retourne l'assetId Immich si le fichier a été modifié, sinon None."""
+def process_file(path: Path, library_root: Path, cfg: dict) -> tuple[bool, str | None]:
+    """Retourne (a_été_modifié, assetId_immich_si_trouvé)."""
     checksum_before = file_checksum(path)
 
     exif_orientation = get_exif_orientation(path)
@@ -199,14 +199,14 @@ def process_file(path: Path, library_root: Path, cfg: dict) -> str | None:
         angle = best_rotation_by_face_detection(path)
         if angle == -1:
             log(SCRIPT_NAME, f"Aucun visage détecté, ignoré : {path}")
-            return None
+            return False, None
         if angle == 0:
-            return None  # déjà dans le bon sens, rien à faire
+            return False, None  # déjà dans le bon sens, rien à faire
         method = f"face_detection({angle}°)"
         img = Image.open(path)
         img = rotate_by_angle(img, angle)
     else:
-        return None
+        return False, None
 
     backup_file(path, library_root)
 
@@ -231,7 +231,7 @@ def process_file(path: Path, library_root: Path, cfg: dict) -> str | None:
     )
     if not asset_id:
         log(SCRIPT_NAME, f"AssetId Immich introuvable pour {path}, régénération manuelle nécessaire", "WARN")
-    return asset_id
+    return True, asset_id
 
 
 def main() -> None:
@@ -250,6 +250,7 @@ def main() -> None:
     processed = state.setdefault("processed_files", {})  # path -> checksum traité
 
     modified_asset_ids: list[str] = []
+    corrected_count = 0
     scanned = 0
 
     for path in library_root.rglob("*"):
@@ -263,7 +264,9 @@ def main() -> None:
             continue  # déjà traité et inchangé depuis
 
         try:
-            asset_id = process_file(path, library_root, cfg)
+            was_modified, asset_id = process_file(path, library_root, cfg)
+            if was_modified:
+                corrected_count += 1
             if asset_id:
                 modified_asset_ids.append(asset_id)
         except Exception as e:
@@ -279,7 +282,7 @@ def main() -> None:
         trigger_immich_jobs(cfg["immich"]["server"], cfg["immich"]["api_key"], modified_asset_ids)
         log(SCRIPT_NAME, f"Job Immich déclenché pour {len(modified_asset_ids)} asset(s).")
 
-    log(SCRIPT_NAME, f"Run terminé. {scanned} fichier(s) scanné(s), {len(modified_asset_ids)} corrigé(s).")
+    log(SCRIPT_NAME, f"Run terminé. {scanned} fichier(s) scanné(s), {corrected_count} corrigé(s), {len(modified_asset_ids)} régénération(s) Immich déclenchée(s).")
 
 
 if __name__ == "__main__":

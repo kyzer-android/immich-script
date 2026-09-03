@@ -6,9 +6,11 @@ galerie avant/après. Sert aussi la page statique index.html.
 Empreinte volontairement légère : pas de base de données, tout repose sur
 les fichiers JSON déjà utilisés par les 3 scripts (config.json, state/*.json).
 """
+import json
 import shutil
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
@@ -97,6 +99,43 @@ def regen_crontab() -> None:
         print(f"Erreur régénération crontab : {e}", file=sys.stderr)
 
 
+RUNNABLE_SCRIPTS = {
+    "orientation_fix": ["python3", "/app/scripts/orientation_fix.py"],
+    "person_to_album": ["python3", "/app/scripts/person_to_album.py"],
+    "bloomin8_optimize": ["node", "/app/scripts/bloomin8_optimize.js"],
+}
+
+
+@app.post("/api/run/{script_name}")
+def run_script(script_name: str):
+    if script_name not in RUNNABLE_SCRIPTS:
+        raise HTTPException(404, "Script inconnu")
+
+    lock_path = DATA_DIR / "state" / f"{script_name}.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    if lock_path.exists():
+        raise HTTPException(409, "Ce script est déjà en cours d'exécution")
+
+    lock_path.touch()
+
+    def _run():
+        try:
+            subprocess.run(RUNNABLE_SCRIPTS[script_name], check=False)
+        finally:
+            lock_path.unlink(missing_ok=True)
+
+    threading.Thread(target=_run, daemon=True).start()
+    return {"status": "started"}
+
+
+@app.get("/api/run/{script_name}/status")
+def run_script_status(script_name: str):
+    if script_name not in RUNNABLE_SCRIPTS:
+        raise HTTPException(404, "Script inconnu")
+    lock_path = DATA_DIR / "state" / f"{script_name}.lock"
+    return {"running": lock_path.exists()}
+
+
 @app.get("/api/backups")
 def list_backups():
     if not BACKUP_DIR.exists():
@@ -163,6 +202,57 @@ def gallery():
                     "relative_path": str(f.relative_to(entry)),
                 })
     return result[:200]  # borne raisonnable pour l'UI
+
+
+@app.get("/api/gallery/before/{backup_id}/{relative_path:path}")
+def gallery_before_image(backup_id: str, relative_path: str):
+    """Sert l'image AVANT correction (version sauvegardée dans le backup)."""
+    if ".." in backup_id or ".." in relative_path:
+        raise HTTPException(400, "Chemin invalide")
+    path = BACKUP_DIR / backup_id / relative_path
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "Image introuvable")
+    return FileResponse(path)
+
+
+@app.get("/api/gallery/after/{relative_path:path}")
+def gallery_after_image(relative_path: str):
+    """Sert l'image APRÈS correction (fichier actuel dans la bibliothèque Immich)."""
+    if ".." in relative_path:
+        raise HTTPException(400, "Chemin invalide")
+    cfg = load_config()
+    library_root = Path(cfg["orientation"]["library_path"])
+    path = library_root / relative_path
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "Image introuvable (peut-être déplacée/supprimée depuis)")
+    return FileResponse(path)
+
+
+STATE_FILES = {
+    "orientation_fix": ("processed_files", "orientation_fix.json"),
+    "bloomin8_optimize": ("processed_asset_ids", "bloomin8_optimize.json"),
+}
+
+
+@app.get("/api/state/{script_name}")
+def get_state(script_name: str, limit: int = 200):
+    if script_name not in STATE_FILES:
+        raise HTTPException(404, "Pas d'état suivi pour ce script")
+    key, filename = STATE_FILES[script_name]
+    path = STATE_DIR / filename
+    if not path.exists():
+        return {"count": 0, "sample": []}
+
+    with open(path, "r", encoding="utf-8") as f:
+        state = json.load(f)
+
+    items = state.get(key, {})
+    if isinstance(items, dict):
+        all_keys = sorted(items.keys())
+    else:  # liste (ex: bloomin8_optimize)
+        all_keys = sorted(items)
+
+    return {"count": len(all_keys), "sample": all_keys[:limit], "truncated": len(all_keys) > limit}
 
 
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

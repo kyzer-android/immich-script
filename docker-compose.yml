@@ -30,6 +30,7 @@ services:
       BLOOMIN8_ALBUM_ID: "04bca25d-8c6e-40e3-8ba0-e9e759bf7bbb"
       BLOOMIN8_ORIENTATION: "portrait"
       BLOOMIN8_DEST_PATH: "/data/bloomin8-share"
+      TZ: "${TZ:-Europe/Paris}"
     logging:
       driver: "json-file"
       options:

@@ -54,6 +54,12 @@
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .link-item { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 8px; }
   .backup-item, .log-line { font-size: 0.82rem; border-bottom: 1px solid var(--border); padding: 6px 0; }
+  .gallery-pair { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 12px; }
+  .gallery-pair .images { display: flex; gap: 8px; margin-top: 8px; }
+  .gallery-pair .images figure { flex: 1; margin: 0; text-align: center; }
+  .gallery-pair .images img { width: 100%; border-radius: 6px; display: block; background: #0a0b0d; }
+  .gallery-pair .images figcaption { font-size: 0.75rem; color: var(--text-dim); margin-top: 4px; }
+  .gallery-pair .path { font-size: 0.78rem; color: var(--text-dim); word-break: break-all; }
   .log-line.WARN { color: var(--warn); }
   .log-line.ERROR { color: var(--danger); }
   #log-output { max-height: 400px; overflow-y: auto; font-family: monospace; }
@@ -76,6 +82,7 @@
   <button class="tab-btn active" data-tab="config">Configuration</button>
   <button class="tab-btn" data-tab="backups">Backups</button>
   <button class="tab-btn" data-tab="logs">Logs</button>
+  <button class="tab-btn" data-tab="state">État</button>
   <button class="tab-btn" data-tab="gallery">Galerie avant/après</button>
 </div>
 
@@ -101,6 +108,10 @@
   <label>Rétention des backups (jours)</label>
   <input type="number" id="orientation_backup_retention">
   <div class="row"><input type="checkbox" id="orientation_face_fallback"> <span>Fallback détection de visage</span></div>
+  <div class="row">
+    <button class="secondary" id="run-orientation-btn" onclick="runScript('orientation_fix')">▶️ Exécuter maintenant</button>
+    <span id="run-orientation-status" style="font-size:0.85rem; color: var(--text-dim);"></span>
+  </div>
 
   <hr style="border-color: var(--border); margin: 20px 0;">
 
@@ -152,6 +163,20 @@
   <div id="log-output"></div>
 </div>
 
+<!-- ===== ÉTAT ===== -->
+<div class="panel" id="panel-state">
+  <h2>📊 Fichiers déjà traités</h2>
+  <div class="row">
+    <select id="state-script">
+      <option value="orientation_fix">Correction d'orientation</option>
+      <option value="bloomin8_optimize">BLOOMIN8</option>
+    </select>
+    <button class="secondary" onclick="loadState()">Rafraîchir</button>
+  </div>
+  <p id="state-count" style="font-size: 1.3rem; margin: 14px 0;"></p>
+  <div id="state-list" style="max-height: 400px; overflow-y: auto; font-family: monospace; font-size: 0.78rem;"></div>
+</div>
+
 <!-- ===== GALERIE ===== -->
 <div class="panel" id="panel-gallery">
   <h2>🖼️ Fichiers traités (backups disponibles)</h2>
@@ -188,6 +213,7 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'backups') loadBackups();
     if (btn.dataset.tab === 'logs') loadLogs();
+    if (btn.dataset.tab === 'state') loadState();
     if (btn.dataset.tab === 'gallery') loadGallery();
   });
 });
@@ -358,12 +384,83 @@ async function loadGallery() {
   container.innerHTML = items.length === 0 ? '<p>Aucun élément.</p>' : '';
   items.forEach(item => {
     const div = document.createElement('div');
-    div.className = 'backup-item';
-    div.textContent = `[${item.backup_id}] ${item.relative_path}`;
+    div.className = 'gallery-pair';
+    const beforeUrl = `/api/gallery/before/${encodeURIComponent(item.backup_id)}/${item.relative_path.split('/').map(encodeURIComponent).join('/')}`;
+    const afterUrl = `/api/gallery/after/${item.relative_path.split('/').map(encodeURIComponent).join('/')}`;
+    div.innerHTML = `
+      <div class="path">[${item.backup_id}] ${item.relative_path}</div>
+      <div class="images">
+        <figure>
+          <img src="${beforeUrl}" loading="lazy" onerror="this.style.opacity=0.2">
+          <figcaption>Avant</figcaption>
+        </figure>
+        <figure>
+          <img src="${afterUrl}" loading="lazy" onerror="this.style.opacity=0.2">
+          <figcaption>Après</figcaption>
+        </figure>
+      </div>
+    `;
     container.appendChild(div);
   });
 }
 
+async function runScript(scriptName) {
+  const btn = document.getElementById('run-orientation-btn');
+  const statusEl = document.getElementById('run-orientation-status');
+  try {
+    const resp = await fetch(`/api/run/${scriptName}`, { method: 'POST' });
+    if (resp.status === 409) {
+      showStatus('Ce script tourne déjà — patiente qu\'il termine.', false);
+      return;
+    }
+    if (!resp.ok) {
+      showStatus('Erreur au lancement du script.', false);
+      return;
+    }
+    showStatus('Script lancé ! Suis la progression dans l\'onglet Logs.');
+    btn.disabled = true;
+    statusEl.textContent = 'En cours...';
+    pollScriptStatus(scriptName, btn, statusEl);
+  } catch (e) {
+    showStatus('Erreur au lancement du script.', false);
+  }
+}
+
+async function pollScriptStatus(scriptName, btn, statusEl) {
+  const interval = setInterval(async () => {
+    const resp = await fetch(`/api/run/${scriptName}/status`);
+    const data = await resp.json();
+    if (!data.running) {
+      clearInterval(interval);
+      btn.disabled = false;
+      statusEl.textContent = 'Terminé ✓';
+      setTimeout(() => { statusEl.textContent = ''; }, 5000);
+    }
+  }, 3000);
+}
+
+async function loadState() {
+  const script = document.getElementById('state-script').value;
+  const resp = await fetch(`/api/state/${script}?limit=300`);
+  if (!resp.ok) {
+    document.getElementById('state-count').textContent = 'Pas de données pour ce script.';
+    document.getElementById('state-list').innerHTML = '';
+    return;
+  }
+  const data = await resp.json();
+  document.getElementById('state-count').textContent =
+    `${data.count} fichier(s) marqué(s) comme traité(s)` + (data.truncated ? ` (300 premiers affichés ci-dessous)` : '');
+  const container = document.getElementById('state-list');
+  container.innerHTML = '';
+  data.sample.forEach(path => {
+    const div = document.createElement('div');
+    div.className = 'log-line';
+    div.textContent = path;
+    container.appendChild(div);
+  });
+}
+
+document.getElementById('state-script').addEventListener('change', loadState);
 document.getElementById('log-script').addEventListener('change', loadLogs);
 
 loadConfig();
