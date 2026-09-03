@@ -8,10 +8,12 @@ services:
     container_name: immich-scripts
     restart: always
     ports:
-      - "8080:8080"  # Dashboard — à mettre derrière Nginx Proxy Manager si besoin
+      - "${DASHBOARD_PORT:-8080}:8080"  # Dashboard — modifiable via variable d'env si le port par défaut est déjà pris
     volumes:
-      # Données persistantes du conteneur (config, state, backups, logs)
+      # Config, state, backups, logs — reste sur le disque local de la VM (pas de la "data" à proprement parler)
       - ${IMMICH_SCRIPTS_DATA}:/data
+      # Sortie BLOOMIN8 (photos optimisées) — sur le RAID, seul dossier à exporter en NFS vers HAOS
+      - ${BLOOMIN8_SHARE_PATH}:/data/bloomin8-share
       # Bibliothèque Immich, en LECTURE-ÉCRITURE pour la correction d'orientation in-place
       - ${IMMICH_LIBRARY_PATH}:/immich-library
       - /etc/localtime:/etc/localtime:ro
