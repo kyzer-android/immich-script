@@ -19,7 +19,9 @@ orientation_fix.py
    qui efface les assignations de personnes existantes).
 """
 import hashlib
+import os
 import shutil
+import signal
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -34,7 +36,7 @@ import pillow_heif
 pillow_heif.register_heif_opener()
 
 sys.path.insert(0, "/app")
-from common_config import load_config, load_state, save_state, log, BACKUP_DIR
+from common_config import load_config, load_state, save_state, log, BACKUP_DIR, STATE_DIR
 
 SCRIPT_NAME = "orientation_fix"
 
@@ -82,13 +84,17 @@ def rotate_by_exif_value(img: Image.Image, orientation: int) -> Image.Image:
 
 def best_rotation_by_face_detection(path: Path) -> int:
     """Teste 0/90/180/270°, retourne l'angle donnant le plus de visages
-    détectés avec le plus haut score de confiance (nb de voisins Haar)."""
+    détectés avec le plus haut score de confiance (nb de voisins Haar).
+
+    Exige une marge de confiance nette entre le meilleur et le 2e meilleur
+    candidat avant de trancher — sinon le résultat est jugé ambigu et
+    AUCUNE rotation n'est appliquée (mieux vaut ne rien faire qu'une
+    mauvaise proposition, la revue manuelle se fait ensuite via le dashboard)."""
     cv_img = cv2.imread(str(path))
     if cv_img is None:
-        return 0
+        return -1
 
-    best_angle = 0
-    best_score = -1
+    scores: dict[int, float] = {}
     for angle in (0, 90, 180, 270):
         if angle == 0:
             rotated = cv_img
@@ -100,20 +106,37 @@ def best_rotation_by_face_detection(path: Path) -> int:
             rotated = cv2.rotate(cv_img, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         gray = cv2.cvtColor(rotated, cv2.COLOR_BGR2GRAY)
+        # minNeighbors relevé (8 au lieu de 5) : réduit nettement les faux positifs
         try:
             faces, reject_levels, level_weights = FACE_CASCADE.detectMultiScale3(
-                gray, scaleFactor=1.1, minNeighbors=5, outputRejectLevels=True
+                gray, scaleFactor=1.1, minNeighbors=8, outputRejectLevels=True
             )
             score = float(sum(level_weights)) if len(level_weights) else 0.0
         except Exception:
-            # Fallback si detectMultiScale3 indisponible sur cette build OpenCV
-            faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5)
+            faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=8)
             score = float(len(faces))
-        if score > best_score:
-            best_score = score
-            best_angle = angle
 
-    return best_angle if best_score > 0 else -1  # -1 = aucun visage trouvé
+        # Ignore les visages trop petits (probables faux positifs sur texture/bruit)
+        min_face_area = 0.01 * rotated.shape[0] * rotated.shape[1]
+        valid_faces = [f for f in faces if f[2] * f[3] >= min_face_area]
+        if not valid_faces:
+            score = 0.0
+
+        scores[angle] = score
+
+    ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+    best_angle, best_score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+
+    if best_score <= 0:
+        return -1  # aucun visage fiable trouvé
+
+    # Marge de confiance : le meilleur candidat doit surclasser nettement
+    # le 2e (au moins 40% de score en plus), sinon on juge le choix ambigu.
+    if second_score > 0 and best_score < second_score * 1.4:
+        return -1
+
+    return best_angle
 
 
 def rotate_by_angle(img: Image.Image, angle: int) -> Image.Image:
@@ -238,7 +261,48 @@ def process_file(path: Path, library_root: Path, cfg: dict) -> tuple[bool, str |
     return True, asset_id
 
 
+LOCK_PATH = STATE_DIR / f"{SCRIPT_NAME}.lock"
+_stop_requested = False
+
+
+def _handle_sigterm(signum, frame):
+    global _stop_requested
+    _stop_requested = True
+    log(SCRIPT_NAME, "Arrêt demandé — sauvegarde de la progression en cours avant de quitter...", "WARN")
+
+
+def _acquire_lock() -> bool:
+    """Retourne True si le verrou est acquis, False si une autre instance tourne déjà."""
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if LOCK_PATH.exists():
+        try:
+            old_pid = int(LOCK_PATH.read_text().strip())
+            os.kill(old_pid, 0)  # ne tue rien, vérifie juste que le PID existe encore
+            return False  # une instance tourne réellement déjà
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass  # verrou périmé (process mort sans nettoyer), on continue
+    LOCK_PATH.write_text(str(os.getpid()))
+    return True
+
+
+def _release_lock() -> None:
+    LOCK_PATH.unlink(missing_ok=True)
+
+
 def main() -> None:
+    if not _acquire_lock():
+        log(SCRIPT_NAME, "Une autre instance tourne déjà, run ignoré.", "WARN")
+        return
+
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+
+    try:
+        _main_body()
+    finally:
+        _release_lock()
+
+
+def _main_body() -> None:
     cfg = load_config()
     if not cfg["orientation"]["enabled"]:
         log(SCRIPT_NAME, "Script désactivé dans la config, arrêt.")
@@ -270,6 +334,11 @@ def main() -> None:
     PROGRESS_EVERY = 50
 
     for path in all_files:
+        if _stop_requested:
+            log(SCRIPT_NAME, f"Arrêt propre après {scanned}/{total_files} fichier(s) — état sauvegardé.")
+            save_state(SCRIPT_NAME, state)
+            return
+
         scanned += 1
         rel = str(path.relative_to(library_root))
         mtime = path.stat().st_mtime

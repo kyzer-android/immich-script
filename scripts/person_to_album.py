@@ -17,8 +17,8 @@ from common_config import load_config, log
 SCRIPT_NAME = "person_to_album"
 
 
-def search_assets_by_person(server: str, api_key: str, person_id: str) -> list[str]:
-    """Retourne la liste des assetIds où cette personne est reconnue."""
+def _search_asset_ids(server: str, api_key: str, filters: dict) -> list[str]:
+    """Recherche paginée générique via /api/search/metadata."""
     asset_ids: list[str] = []
     page = 1
     while True:
@@ -26,12 +26,12 @@ def search_assets_by_person(server: str, api_key: str, person_id: str) -> list[s
             resp = requests.post(
                 f"{server}/api/search/metadata",
                 headers={"x-api-key": api_key, "Content-Type": "application/json"},
-                json={"personIds": [person_id], "page": page, "size": 500},
+                json={**filters, "page": page, "size": 500},
                 timeout=30,
             )
             resp.raise_for_status()
         except requests.RequestException as e:
-            log(SCRIPT_NAME, f"Erreur recherche personId={person_id} : {e}", "ERROR")
+            log(SCRIPT_NAME, f"Erreur recherche ({filters}) : {e}", "ERROR")
             return asset_ids
 
         data = resp.json()
@@ -46,18 +46,17 @@ def search_assets_by_person(server: str, api_key: str, person_id: str) -> list[s
     return asset_ids
 
 
+def search_assets_by_person(server: str, api_key: str, person_id: str) -> list[str]:
+    """Retourne la liste des assetIds où cette personne est reconnue."""
+    return _search_asset_ids(server, api_key, {"personIds": [person_id]})
+
+
 def get_album_asset_ids(server: str, api_key: str, album_id: str) -> set[str]:
-    try:
-        resp = requests.get(
-            f"{server}/api/albums/{album_id}",
-            headers={"x-api-key": api_key},
-            timeout=30,
-        )
-        resp.raise_for_status()
-        return {a["id"] for a in resp.json().get("assets", [])}
-    except requests.RequestException as e:
-        log(SCRIPT_NAME, f"Erreur lecture album {album_id} : {e}", "ERROR")
-        return set()
+    """Utilise /api/search/metadata (albumIds) plutôt que GET /api/albums/{id} :
+    ce dernier s'est révélé peu fiable pour lister les assets selon la version
+    d'Immich (champ potentiellement vide/incomplet), ce qui causait des
+    re-tentatives d'ajout permanentes sans que le script s'en rende compte."""
+    return set(_search_asset_ids(server, api_key, {"albumIds": [album_id]}))
 
 
 def add_assets_to_album(server: str, api_key: str, album_id: str, asset_ids: list[str]) -> None:

@@ -7,14 +7,16 @@ Empreinte volontairement légère : pas de base de données, tout repose sur
 les fichiers JSON déjà utilisés par les 3 scripts (config.json, state/*.json).
 """
 import json
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -111,28 +113,41 @@ def run_script(script_name: str):
     if script_name not in RUNNABLE_SCRIPTS:
         raise HTTPException(404, "Script inconnu")
 
-    lock_path = DATA_DIR / "state" / f"{script_name}.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = STATE_DIR / f"{script_name}.lock"
     if lock_path.exists():
         raise HTTPException(409, "Ce script est déjà en cours d'exécution")
 
-    lock_path.touch()
-
     def _run():
-        try:
-            subprocess.run(RUNNABLE_SCRIPTS[script_name], check=False)
-        finally:
-            lock_path.unlink(missing_ok=True)
+        subprocess.run(RUNNABLE_SCRIPTS[script_name])
 
     threading.Thread(target=_run, daemon=True).start()
     return {"status": "started"}
+
+
+@app.post("/api/run/{script_name}/stop")
+def stop_script(script_name: str):
+    if script_name not in RUNNABLE_SCRIPTS:
+        raise HTTPException(404, "Script inconnu")
+
+    lock_path = STATE_DIR / f"{script_name}.lock"
+    if not lock_path.exists():
+        raise HTTPException(409, "Ce script n'est pas en cours d'exécution")
+
+    try:
+        pid = int(lock_path.read_text().strip())
+        os.kill(pid, signal.SIGTERM)  # arrêt propre : le script sauvegarde son état avant de quitter
+    except (ValueError, ProcessLookupError):
+        lock_path.unlink(missing_ok=True)  # verrou périmé, on nettoie
+        raise HTTPException(409, "Le process n'existait déjà plus, verrou nettoyé.")
+
+    return {"status": "stopping"}
 
 
 @app.get("/api/run/{script_name}/status")
 def run_script_status(script_name: str):
     if script_name not in RUNNABLE_SCRIPTS:
         raise HTTPException(404, "Script inconnu")
-    lock_path = DATA_DIR / "state" / f"{script_name}.lock"
+    lock_path = STATE_DIR / f"{script_name}.lock"
     return {"running": lock_path.exists()}
 
 
@@ -172,22 +187,46 @@ def get_logs(script_name: str, lines: int = 200):
 
 
 @app.get("/api/gallery")
-def gallery():
+def gallery(limit: int = 50, offset: int = 0):
     """Liste les backups disponibles comme paires avant/après potentielles,
     en s'appuyant sur les chemins relatifs conservés dans chaque snapshot."""
     if not BACKUP_DIR.exists():
-        return []
-    result = []
+        return {"total": 0, "items": []}
+    all_items = []
     for entry in sorted(BACKUP_DIR.iterdir(), reverse=True):
         if not entry.is_dir():
             continue
         for f in entry.rglob("*"):
             if f.is_file():
-                result.append({
+                all_items.append({
                     "backup_id": entry.name,
                     "relative_path": str(f.relative_to(entry)),
                 })
-    return result[:200]  # borne raisonnable pour l'UI
+    return {"total": len(all_items), "items": all_items[offset:offset + limit]}
+
+
+@app.get("/api/gallery/before-raw/{backup_id}/{relative_path:path}")
+def gallery_before_raw(backup_id: str, relative_path: str):
+    """Sert l'image AVANT correction en IGNORANT son tag EXIF Orientation,
+    pour que le navigateur ne compense pas automatiquement l'affichage —
+    montre les pixels tels que réellement stockés sur le disque."""
+    if ".." in backup_id or ".." in relative_path:
+        raise HTTPException(400, "Chemin invalide")
+    path = BACKUP_DIR / backup_id / relative_path
+    if not path.exists() or not path.is_file():
+        raise HTTPException(404, "Image introuvable")
+
+    import io
+    from PIL import Image as PILImage
+
+    img = PILImage.open(path)
+    img.load()
+    buf = io.BytesIO()
+    # Pas de exif= passé ici : le tag Orientation d'origine n'est PAS
+    # transmis, donc le navigateur affiche les pixels bruts sans rotation.
+    img.save(buf, format="JPEG", quality=90)
+    buf.seek(0)
+    return Response(content=buf.read(), media_type="image/jpeg")
 
 
 @app.get("/api/gallery/before/{backup_id}/{relative_path:path}")

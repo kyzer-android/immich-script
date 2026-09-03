@@ -118,6 +118,7 @@
   <div class="row"><input type="checkbox" id="orientation_face_fallback"> <span>Fallback détection de visage</span></div>
   <div class="row">
     <button class="secondary" id="run-orientation-btn" onclick="runScript('orientation_fix')">▶️ Exécuter maintenant</button>
+    <button class="secondary danger" id="stop-orientation-btn" onclick="stopScript('orientation_fix')" style="display:none;">⏹ Stop</button>
     <span id="run-orientation-status" style="font-size:0.85rem; color: var(--text-dim);"></span>
   </div>
 
@@ -195,7 +196,25 @@
   <p style="font-size: 0.85rem; color: var(--text-dim);">
     Clique sur la vignette à conserver pour chaque paire (par défaut : la version corrigée). Rien à faire pour les paires qui te vont — elles seront validées avec le choix par défaut.
   </p>
+  <div class="row">
+    <label style="margin:0;">Par page</label>
+    <select id="gallery-page-size" style="width:auto;">
+      <option value="20">20</option>
+      <option value="50" selected>50</option>
+      <option value="100">100</option>
+    </select>
+    <button class="secondary" onclick="galleryPage(0)">Rafraîchir</button>
+  </div>
+  <div class="row" style="margin-top:8px;">
+    <button class="secondary" onclick="selectAllGallery('before')">⬅️ Tout garder Original</button>
+    <button class="secondary" onclick="selectAllGallery('after')">➡️ Tout garder Corrigée</button>
+  </div>
   <div id="gallery-list"></div>
+  <div class="row" style="justify-content:center; margin-top:10px;">
+    <button class="secondary" onclick="galleryPage(currentGalleryOffset - currentGalleryPageSize)">← Précédent</button>
+    <span id="gallery-page-label" style="font-size:0.85rem; color: var(--text-dim);"></span>
+    <button class="secondary" onclick="galleryPage(currentGalleryOffset + currentGalleryPageSize)">Suivant →</button>
+  </div>
   <div id="gallery-validate-bar">
     <span id="gallery-count-label"></span>
     <button onclick="validateGallery()">✅ Valider les choix</button>
@@ -382,37 +401,51 @@ async function loadLogs() {
   container.scrollTop = container.scrollHeight;
 }
 
-let gallerySelections = {}; // "backup_id|relative_path" -> "before" | "after"
+let gallerySelections = {}; // "backup_id|relative_path" -> "before" | "after", conservé entre les pages
+let currentGalleryOffset = 0;
+let currentGalleryPageSize = 50;
+let currentGalleryTotal = 0;
 
 function galleryKey(item) {
   return `${item.backup_id}|${item.relative_path}`;
 }
 
+async function galleryPage(newOffset) {
+  currentGalleryPageSize = parseInt(document.getElementById('gallery-page-size').value, 10);
+  currentGalleryOffset = Math.max(0, newOffset);
+  await loadGallery();
+}
+
 async function loadGallery() {
-  const resp = await fetch('/api/gallery');
-  const items = await resp.json();
+  const resp = await fetch(`/api/gallery?limit=${currentGalleryPageSize}&offset=${currentGalleryOffset}`);
+  const data = await resp.json();
+  currentGalleryTotal = data.total;
+  const items = data.items;
+
   const container = document.getElementById('gallery-list');
   container.innerHTML = items.length === 0 ? '<p>Aucune photo corrigée pour le moment.</p>' : '';
-  gallerySelections = {};
 
   items.forEach(item => {
     const key = galleryKey(item);
-    gallerySelections[key] = 'after'; // par défaut : on garde la version corrigée
+    if (!(key in gallerySelections)) {
+      gallerySelections[key] = 'after'; // par défaut : on garde la version corrigée
+    }
 
     const div = document.createElement('div');
     div.className = 'gallery-pair';
     const encodedPath = item.relative_path.split('/').map(encodeURIComponent).join('/');
-    const beforeUrl = `/api/gallery/before/${encodeURIComponent(item.backup_id)}/${encodedPath}`;
+    const beforeUrl = `/api/gallery/before-raw/${encodeURIComponent(item.backup_id)}/${encodedPath}`;
     const afterUrl = `/api/gallery/after/${encodedPath}`;
+    const current = gallerySelections[key];
 
     div.innerHTML = `
       <div class="path">${item.relative_path}</div>
       <div class="images">
-        <figure data-key="${key}" data-choice="before">
+        <figure data-key="${key}" data-choice="before" class="${current === 'before' ? 'selected' : ''}">
           <img src="${beforeUrl}" loading="lazy" onerror="this.style.opacity=0.15">
-          <figcaption>Original</figcaption>
+          <figcaption>Original (brut, sans EXIF)</figcaption>
         </figure>
-        <figure data-key="${key}" data-choice="after" class="selected">
+        <figure data-key="${key}" data-choice="after" class="${current === 'after' ? 'selected' : ''}">
           <img src="${afterUrl}" loading="lazy" onerror="this.style.opacity=0.15">
           <figcaption>Corrigée</figcaption>
         </figure>
@@ -432,7 +465,20 @@ async function loadGallery() {
     });
   });
 
-  document.getElementById('gallery-count-label').textContent = `${items.length} paire(s) à valider`;
+  const totalPages = Math.max(1, Math.ceil(currentGalleryTotal / currentGalleryPageSize));
+  const currentPage = Math.floor(currentGalleryOffset / currentGalleryPageSize) + 1;
+  document.getElementById('gallery-page-label').textContent = `Page ${currentPage}/${totalPages} — ${currentGalleryTotal} au total`;
+  document.getElementById('gallery-count-label').textContent = `${Object.keys(gallerySelections).length} paire(s) à valider (toutes pages confondues)`;
+}
+
+function selectAllGallery(choice) {
+  document.querySelectorAll('#gallery-list figure').forEach(fig => {
+    if (fig.dataset.choice === choice) {
+      gallerySelections[fig.dataset.key] = choice;
+    }
+    fig.classList.toggle('selected', fig.dataset.choice === choice);
+  });
+  showStatus(`Toutes les paires de cette page réglées sur "${choice === 'before' ? 'Original' : 'Corrigée'}".`);
 }
 
 async function validateGallery() {
@@ -454,12 +500,15 @@ async function validateGallery() {
   });
   const data = await resp.json();
   showStatus(`${data.resolved} choix appliqué(s).` + (data.errors.length ? ` ${data.errors.length} erreur(s).` : ''));
-  loadGallery();
+  gallerySelections = {};
+  currentGalleryOffset = 0;
+  await loadGallery();
   loadBackups();
 }
 
 async function runScript(scriptName) {
   const btn = document.getElementById('run-orientation-btn');
+  const stopBtn = document.getElementById('stop-orientation-btn');
   const statusEl = document.getElementById('run-orientation-status');
   try {
     const resp = await fetch(`/api/run/${scriptName}`, { method: 'POST' });
@@ -473,20 +522,36 @@ async function runScript(scriptName) {
     }
     showStatus('Script lancé ! Suis la progression dans l\'onglet Logs.');
     btn.disabled = true;
+    stopBtn.style.display = 'inline-block';
     statusEl.textContent = 'En cours...';
-    pollScriptStatus(scriptName, btn, statusEl);
+    pollScriptStatus(scriptName, btn, stopBtn, statusEl);
   } catch (e) {
     showStatus('Erreur au lancement du script.', false);
   }
 }
 
-async function pollScriptStatus(scriptName, btn, statusEl) {
+async function stopScript(scriptName) {
+  if (!confirm('Arrêter ce script en cours d\'exécution ?')) return;
+  try {
+    const resp = await fetch(`/api/run/${scriptName}/stop`, { method: 'POST' });
+    if (resp.ok) {
+      showStatus('Script arrêté.');
+    } else {
+      showStatus('Impossible d\'arrêter (déjà terminé ?).', false);
+    }
+  } catch (e) {
+    showStatus('Erreur à l\'arrêt du script.', false);
+  }
+}
+
+async function pollScriptStatus(scriptName, btn, stopBtn, statusEl) {
   const interval = setInterval(async () => {
     const resp = await fetch(`/api/run/${scriptName}/status`);
     const data = await resp.json();
     if (!data.running) {
       clearInterval(interval);
       btn.disabled = false;
+      stopBtn.style.display = 'none';
       statusEl.textContent = 'Terminé ✓';
       setTimeout(() => { statusEl.textContent = ''; }, 5000);
     }
@@ -517,7 +582,22 @@ async function loadState() {
 document.getElementById('state-script').addEventListener('change', loadState);
 document.getElementById('log-script').addEventListener('change', loadLogs);
 
+async function checkInitialRunStatus() {
+  const btn = document.getElementById('run-orientation-btn');
+  const stopBtn = document.getElementById('stop-orientation-btn');
+  const statusEl = document.getElementById('run-orientation-status');
+  const resp = await fetch('/api/run/orientation_fix/status');
+  const data = await resp.json();
+  if (data.running) {
+    btn.disabled = true;
+    stopBtn.style.display = 'inline-block';
+    statusEl.textContent = 'En cours...';
+    pollScriptStatus('orientation_fix', btn, stopBtn, statusEl);
+  }
+}
+
 loadConfig();
+checkInitialRunStatus();
 </script>
 </body>
 </html>
