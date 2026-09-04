@@ -340,7 +340,7 @@ def _main_body() -> None:
     modified_asset_ids: list[str] = []
     corrected_count = 0
     scanned = 0
-    PROGRESS_EVERY = 50
+    PROGRESS_EVERY = 10
 
     for path in all_files:
         if _stop_requested:
