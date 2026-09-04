@@ -207,10 +207,14 @@ def trigger_immich_jobs(server: str, api_key: str, asset_ids: list[str]) -> None
             log(SCRIPT_NAME, f"Erreur job {job_name} : {e}", "WARN")
 
 
-def process_file(path: Path, library_root: Path, cfg: dict) -> tuple[bool, str | None]:
-    """Retourne (a_été_modifié, assetId_immich_si_trouvé)."""
-    checksum_before = file_checksum(path)
+def process_file(path: Path, library_root: Path, cfg: dict, checksum_before: str) -> tuple[bool, str | None, str]:
+    """Retourne (a_été_modifié, assetId_immich_si_trouvé, checksum_final).
 
+    checksum_final = checksum_before si rien n'a changé, ou le nouveau
+    checksum (post-modification) sinon — c'est cette valeur que l'appelant
+    doit enregistrer dans le state pour la comparaison au prochain run
+    (plus fiable qu'un mtime, qui peut dériver sans que le contenu change
+    réellement — ex: NFS, touch accidentel)."""
     exif_orientation = get_exif_orientation(path)
     method = None
 
@@ -222,15 +226,15 @@ def process_file(path: Path, library_root: Path, cfg: dict) -> tuple[bool, str |
     elif cfg["orientation"]["face_detection_fallback"]:
         angle = best_rotation_by_face_detection(path)
         if angle == -1:
-            return False, None  # aucun visage fiable / ambigu, silencieux (pas de bruit dans les logs)
+            return False, None, checksum_before  # aucun visage fiable / ambigu
         if angle == 0:
-            return False, None  # déjà dans le bon sens, rien à faire
+            return False, None, checksum_before  # déjà dans le bon sens, rien à faire
         method = f"face_detection({angle}°)"
         img = Image.open(path)
         icc_profile = img.info.get("icc_profile")
         img = rotate_by_angle(img, angle)
     else:
-        return False, None
+        return False, None, checksum_before
 
     backup_file(path, library_root)
 
@@ -257,7 +261,9 @@ def process_file(path: Path, library_root: Path, cfg: dict) -> tuple[bool, str |
     )
     if not asset_id:
         log(SCRIPT_NAME, f"AssetId Immich introuvable pour {path}, régénération manuelle nécessaire", "WARN")
-    return True, asset_id
+
+    checksum_after = file_checksum(path)
+    return True, asset_id, checksum_after
 
 
 LOCK_PATH = STATE_DIR / f"{SCRIPT_NAME}.lock"
@@ -301,6 +307,17 @@ def main() -> None:
         _release_lock()
 
 
+def _refresh_manual_review(state: dict, manual_review: set) -> set:
+    """Relit manual_review depuis le disque et fusionne avec la version en
+    mémoire — évite d'écraser une validation faite via le dashboard pendant
+    que ce run (potentiellement long) est encore en cours."""
+    fresh_state = load_state(SCRIPT_NAME)
+    fresh_manual_review = set(fresh_state.get("manual_review", []))
+    merged = manual_review | fresh_manual_review
+    state["manual_review"] = sorted(merged)
+    return merged
+
+
 def _main_body() -> None:
     cfg = load_config()
     if not cfg["orientation"]["enabled"]:
@@ -319,7 +336,7 @@ def _main_body() -> None:
 
     formats = tuple(cfg["orientation"]["formats"])
     state = load_state(SCRIPT_NAME)
-    processed = state.setdefault("processed_files", {})  # path -> mtime traité (tous, pour le resume)
+    processed = state.setdefault("processed_files", {})  # path -> checksum traité (tous, pour le resume)
     corrected = set(state.setdefault("corrected_files", []))  # uniquement les vraies corrections
     manual_review = set(state.get("manual_review", []))  # tranchés manuellement, jamais retraités
 
@@ -335,22 +352,23 @@ def _main_body() -> None:
 
     for path in all_files:
         if _stop_requested:
+            manual_review = _refresh_manual_review(state, manual_review)
             log(SCRIPT_NAME, f"Arrêt propre après {scanned}/{total_files} fichier(s) — état sauvegardé.")
             save_state(SCRIPT_NAME, state)
             return
 
         scanned += 1
         rel = str(path.relative_to(library_root))
-        mtime = path.stat().st_mtime
+        checksum = file_checksum(path)
 
         if rel in manual_review:
             continue  # décision tranchée manuellement via le dashboard, jamais retraité
 
-        if processed.get(rel) == mtime:
-            continue  # déjà traité et inchangé depuis
+        if processed.get(rel) == checksum:
+            continue  # déjà traité et contenu inchangé depuis (comparaison par checksum, pas par mtime)
 
         try:
-            was_modified, asset_id = process_file(path, library_root, cfg)
+            was_modified, asset_id, final_checksum = process_file(path, library_root, cfg, checksum)
             if was_modified:
                 corrected_count += 1
                 corrected.add(rel)
@@ -360,13 +378,15 @@ def _main_body() -> None:
             log(SCRIPT_NAME, f"Erreur sur {path} : {e}", "ERROR")
             continue
 
-        processed[rel] = path.stat().st_mtime  # mtime post-modification
+        processed[rel] = final_checksum
         state["corrected_files"] = sorted(corrected)
 
         if scanned % PROGRESS_EVERY == 0:
+            manual_review = _refresh_manual_review(state, manual_review)
             save_state(SCRIPT_NAME, state)  # persiste régulièrement, pas seulement en fin de run
             log(SCRIPT_NAME, f"Progression : {scanned}/{total_files} scanné(s), {corrected_count} corrigé(s) jusqu'ici.")
 
+    manual_review = _refresh_manual_review(state, manual_review)
     save_state(SCRIPT_NAME, state)
     cleanup_old_backups(cfg["orientation"]["backup_retention_days"])
 
