@@ -13,9 +13,11 @@ import signal
 import subprocess
 import sys
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 import piexif
+from PIL import Image as PILImage
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -307,6 +309,9 @@ def resolve_gallery_batch(payload: GalleryResolveBatch):
         with open(state_path, "r", encoding="utf-8") as f:
             state = json.load(f)
     manual_review = set(state.get("manual_review", []))
+    processed_files = state.setdefault("processed_files", {})
+    corrected_files = set(state.get("corrected_files", []))
+    needs_manual_rotation = set(state.get("needs_manual_rotation", []))
 
     done, errors = 0, []
 
@@ -339,15 +344,18 @@ def resolve_gallery_batch(payload: GalleryResolveBatch):
 
             elif item.keep == "unresolved":
                 # Ni l'original ni la correction ne sont bons : on restaure
-                # l'original SANS rien déclarer de correct (pas de force EXIF,
-                # pas de manual_review) — le fichier reste éligible à un futur
-                # nouveau passage de détection.
+                # l'original SANS rien déclarer de correct, on retire l'entrée
+                # de processed_files, et on l'ajoute à needs_manual_rotation
+                # pour traitement dans l'onglet dédié.
                 if not backup_path.exists():
                     errors.append(item.relative_path)
                     continue
                 library_path.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(backup_path, library_path)
                 backup_path.unlink()
+                processed_files.pop(item.relative_path, None)
+                corrected_files.discard(item.relative_path)
+                needs_manual_rotation.add(item.relative_path)
                 done += 1
 
             else:
@@ -356,6 +364,8 @@ def resolve_gallery_batch(payload: GalleryResolveBatch):
             errors.append(item.relative_path)
 
     state["manual_review"] = sorted(manual_review)
+    state["corrected_files"] = sorted(corrected_files)
+    state["needs_manual_rotation"] = sorted(needs_manual_rotation)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with open(state_path, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
@@ -376,8 +386,20 @@ def get_state(script_name: str, limit: int = 200):
         raise HTTPException(404, "Pas d'état suivi pour ce script")
     key, filename = STATE_FILES[script_name]
     path = STATE_DIR / filename
+
+    total = None
+    if script_name in ("orientation_fix", "orientation_fix_corrected"):
+        cfg = load_config()
+        library_root = Path(cfg["orientation"]["library_path"])
+        user_id = cfg["orientation"].get("user_id", "").strip()
+        if user_id:
+            library_root = library_root / user_id
+        formats = tuple(cfg["orientation"]["formats"])
+        if library_root.exists():
+            total = sum(1 for p in library_root.rglob("*") if p.is_file() and p.suffix.lower() in formats)
+
     if not path.exists():
-        return {"count": 0, "sample": []}
+        return {"count": 0, "total": total, "sample": []}
 
     with open(path, "r", encoding="utf-8") as f:
         state = json.load(f)
@@ -385,10 +407,89 @@ def get_state(script_name: str, limit: int = 200):
     items = state.get(key, {})
     if isinstance(items, dict):
         all_keys = sorted(items.keys())
-    else:  # liste (ex: bloomin8_optimize)
+    else:  # liste (ex: bloomin8_optimize, corrected_files)
         all_keys = sorted(items)
 
-    return {"count": len(all_keys), "sample": all_keys[:limit], "truncated": len(all_keys) > limit}
+    return {"count": len(all_keys), "total": total, "sample": all_keys[:limit], "truncated": len(all_keys) > limit}
+
+
+@app.get("/api/manual-rotation")
+def list_manual_rotation():
+    state_path = STATE_DIR / "orientation_fix.json"
+    if not state_path.exists():
+        return []
+    with open(state_path, "r", encoding="utf-8") as f:
+        state = json.load(f)
+    return sorted(state.get("needs_manual_rotation", []))
+
+
+class ManualRotationSave(BaseModel):
+    relative_path: str
+    angle: int  # 0, 90, 180, 270 — sens horaire, cumulé côté frontend
+
+
+@app.post("/api/manual-rotation/save")
+def save_manual_rotation(payload: ManualRotationSave):
+    if ".." in payload.relative_path:
+        raise HTTPException(400, "Chemin invalide")
+    if payload.angle not in (0, 90, 180, 270):
+        raise HTTPException(400, "Angle invalide")
+
+    cfg = load_config()
+    library_root = Path(cfg["orientation"]["library_path"])
+    user_id = cfg["orientation"].get("user_id", "").strip()
+    if user_id:
+        library_root = library_root / user_id
+
+    library_path = library_root / payload.relative_path
+    if not library_path.exists():
+        raise HTTPException(404, "Fichier introuvable")
+
+    if payload.angle != 0:
+        # Backup avant modification, même politique que le script automatique
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        backup_dest = BACKUP_DIR / ts / payload.relative_path
+        backup_dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(library_path, backup_dest)
+
+        img = PILImage.open(library_path)
+        icc_profile = img.info.get("icc_profile")
+        img = img.rotate(-payload.angle, expand=True)  # -angle = sens horaire, cohérent avec l'aperçu
+
+        exif_bytes = b""
+        try:
+            exif_dict = piexif.load(str(library_path))
+            exif_dict["0th"][piexif.ImageIFD.Orientation] = 1
+            exif_bytes = piexif.dump(exif_dict)
+        except Exception:
+            pass
+
+        save_kwargs = {"quality": 95}
+        if exif_bytes:
+            save_kwargs["exif"] = exif_bytes
+        if icc_profile:
+            save_kwargs["icc_profile"] = icc_profile
+        img.save(library_path, **save_kwargs)
+
+    state_path = STATE_DIR / "orientation_fix.json"
+    state = {}
+    if state_path.exists():
+        with open(state_path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+
+    needs_rotation = set(state.get("needs_manual_rotation", []))
+    needs_rotation.discard(payload.relative_path)
+    manual_review = set(state.get("manual_review", []))
+    manual_review.add(payload.relative_path)  # décision définitive, jamais retraité automatiquement
+
+    state["needs_manual_rotation"] = sorted(needs_rotation)
+    state["manual_review"] = sorted(manual_review)
+
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2, ensure_ascii=False)
+
+    return {"status": "ok"}
 
 
 app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")

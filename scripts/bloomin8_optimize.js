@@ -23,6 +23,36 @@ const { ditherImage, replaceColors, aitjcizeSpectra6Palette } = require("epdopti
 const DATA_DIR = process.env.DATA_DIR || "/data";
 const CONFIG_PATH = path.join(DATA_DIR, "config", "config.json");
 const STATE_PATH = path.join(DATA_DIR, "state", "bloomin8_optimize.json");
+const LOCK_PATH = path.join(DATA_DIR, "state", "bloomin8_optimize.lock");
+
+function acquireLock() {
+  fs.mkdirSync(path.dirname(LOCK_PATH), { recursive: true });
+  if (fs.existsSync(LOCK_PATH)) {
+    const oldPid = parseInt(fs.readFileSync(LOCK_PATH, "utf-8").trim(), 10);
+    try {
+      process.kill(oldPid, 0); // ne tue rien, vérifie juste que le PID existe encore
+      return false; // une instance tourne réellement déjà
+    } catch (e) {
+      // verrou périmé (process mort sans nettoyer), on continue
+    }
+  }
+  fs.writeFileSync(LOCK_PATH, String(process.pid));
+  return true;
+}
+
+function releaseLock() {
+  try {
+    fs.unlinkSync(LOCK_PATH);
+  } catch (e) {
+    // déjà absent, rien à faire
+  }
+}
+
+let stopRequested = false;
+process.on("SIGTERM", () => {
+  stopRequested = true;
+  log("Arrêt demandé — sauvegarde de la progression en cours avant de quitter...", "WARN");
+});
 
 function log(message, level = "INFO") {
   const ts = new Date().toISOString();
@@ -123,7 +153,7 @@ async function optimizeForSpectra6(buffer, targetWidth, targetHeight) {
   return deviceCanvas.toBuffer("image/jpeg", { quality: 0.92 });
 }
 
-async function main() {
+async function mainBody() {
   const cfg = loadConfig();
   const bloomin8 = cfg.bloomin8;
 
@@ -175,6 +205,12 @@ async function main() {
   let done = 0;
 
   for (const asset of filtered) {
+    if (stopRequested) {
+      saveState({ processed_asset_ids: Array.from(processedSet) });
+      log(`Arrêt propre après ${done} image(s) optimisée(s) — état sauvegardé.`);
+      return;
+    }
+
     if (!fullRebuild && processedSet.has(asset.id)) continue; // déjà traité, run incrémental
 
     try {
@@ -201,6 +237,18 @@ async function main() {
   saveConfig(cfg);
 
   log(`Run terminé. ${done} image(s) optimisée(s) et déposée(s) dans ${destDir}.`);
+}
+
+async function main() {
+  if (!acquireLock()) {
+    log("Une autre instance tourne déjà, run ignoré.", "WARN");
+    return;
+  }
+  try {
+    await mainBody();
+  } finally {
+    releaseLock();
+  }
 }
 
 main().catch((e) => {

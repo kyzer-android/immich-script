@@ -14,11 +14,10 @@ orientation_fix.py
    c. Si aucun visage n'est trouvé dans aucune rotation, on laisse la photo
       telle quelle (rien de fiable pour décider) et on log le cas.
 3. Sauvegarde un backup horodaté AVANT toute modification.
-4. Retrouve l'assetId Immich (via checksum) et déclenche un job ciblé
+4. Retrouve l'assetId Immich (via recherche par chemin) et déclenche un job ciblé
    regenerate-thumbnail + refresh-faces (PAS de "Facial Recognition globale",
    qui efface les assignations de personnes existantes).
 """
-import hashlib
 import os
 import shutil
 import signal
@@ -44,17 +43,6 @@ SCRIPT_NAME = "orientation_fix"
 FACE_CASCADE = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
-
-
-def file_checksum(path: Path) -> str:
-    """SHA1 du contenu brut du fichier, format attendu par l'API Immich
-    (bulk-upload-check). À vérifier/adapter si la version d'Immich change
-    d'algorithme de checksum."""
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def get_exif_orientation(path: Path) -> int | None:
@@ -171,21 +159,31 @@ def cleanup_old_backups(retention_days: int) -> None:
             log(SCRIPT_NAME, f"Backup expiré supprimé : {entry.name}")
 
 
-def get_immich_asset_id(server: str, api_key: str, checksum: str) -> str | None:
+def get_immich_asset_id_by_path(server: str, api_key: str, rel_path: str) -> str | None:
+    """Retrouve l'assetId via une recherche par nom de fichier + chemin.
+
+    Plus fiable qu'un lookup par checksum (bulk-upload-check) : pour les
+    assets importés via scan de bibliothèque (Library/External Library),
+    Immich calcule son checksum comme SHA1("path:" + originalPath) — PAS un
+    hash du contenu réel du fichier — ce qui rend le lookup par checksum de
+    contenu systématiquement infructueux pour ce type d'assets."""
+    filename = Path(rel_path).name
     try:
         resp = requests.post(
-            f"{server}/api/assets/bulk-upload-check",
+            f"{server}/api/search/metadata",
             headers={"x-api-key": api_key, "Content-Type": "application/json"},
-            json={"assets": [{"id": "orientation-fix-check", "checksum": checksum}]},
+            json={"originalFileName": filename, "page": 1, "size": 50},
             timeout=30,
         )
         resp.raise_for_status()
-        results = resp.json().get("results", [])
-        for r in results:
-            if r.get("action") == "reject" and r.get("assetId"):
-                return r["assetId"]
+        items = resp.json().get("assets", {}).get("items", [])
+        for item in items:
+            if item.get("originalPath", "").endswith(rel_path):
+                return item["id"]
+        if len(items) == 1:
+            return items[0]["id"]  # un seul résultat, on le prend même si le chemin ne matche pas exactement
     except requests.RequestException as e:
-        log(SCRIPT_NAME, f"Erreur lookup assetId (checksum {checksum[:8]}...) : {e}", "WARN")
+        log(SCRIPT_NAME, f"Erreur recherche assetId ({filename}) : {e}", "WARN")
     return None
 
 
@@ -207,14 +205,8 @@ def trigger_immich_jobs(server: str, api_key: str, asset_ids: list[str]) -> None
             log(SCRIPT_NAME, f"Erreur job {job_name} : {e}", "WARN")
 
 
-def process_file(path: Path, library_root: Path, cfg: dict, checksum_before: str) -> tuple[bool, str | None, str]:
-    """Retourne (a_été_modifié, assetId_immich_si_trouvé, checksum_final).
-
-    checksum_final = checksum_before si rien n'a changé, ou le nouveau
-    checksum (post-modification) sinon — c'est cette valeur que l'appelant
-    doit enregistrer dans le state pour la comparaison au prochain run
-    (plus fiable qu'un mtime, qui peut dériver sans que le contenu change
-    réellement — ex: NFS, touch accidentel)."""
+def process_file(path: Path, library_root: Path, cfg: dict) -> tuple[bool, str | None]:
+    """Retourne (a_été_modifié, assetId_immich_si_trouvé)."""
     exif_orientation = get_exif_orientation(path)
     method = None
 
@@ -226,15 +218,15 @@ def process_file(path: Path, library_root: Path, cfg: dict, checksum_before: str
     elif cfg["orientation"]["face_detection_fallback"]:
         angle = best_rotation_by_face_detection(path)
         if angle == -1:
-            return False, None, checksum_before  # aucun visage fiable / ambigu
+            return False, None  # aucun visage fiable / ambigu
         if angle == 0:
-            return False, None, checksum_before  # déjà dans le bon sens, rien à faire
+            return False, None  # déjà dans le bon sens, rien à faire
         method = f"face_detection({angle}°)"
         img = Image.open(path)
         icc_profile = img.info.get("icc_profile")
         img = rotate_by_angle(img, angle)
     else:
-        return False, None, checksum_before
+        return False, None
 
     backup_file(path, library_root)
 
@@ -256,14 +248,14 @@ def process_file(path: Path, library_root: Path, cfg: dict, checksum_before: str
 
     log(SCRIPT_NAME, f"Corrigé ({method}) : {path}")
 
-    asset_id = get_immich_asset_id(
-        cfg["immich"]["server"], cfg["immich"]["api_key"], checksum_before
+    rel_path = str(path.relative_to(library_root))
+    asset_id = get_immich_asset_id_by_path(
+        cfg["immich"]["server"], cfg["immich"]["api_key"], rel_path
     )
     if not asset_id:
         log(SCRIPT_NAME, f"AssetId Immich introuvable pour {path}, régénération manuelle nécessaire", "WARN")
 
-    checksum_after = file_checksum(path)
-    return True, asset_id, checksum_after
+    return True, asset_id
 
 
 LOCK_PATH = STATE_DIR / f"{SCRIPT_NAME}.lock"
@@ -336,7 +328,7 @@ def _main_body() -> None:
 
     formats = tuple(cfg["orientation"]["formats"])
     state = load_state(SCRIPT_NAME)
-    processed = state.setdefault("processed_files", {})  # path -> checksum traité (tous, pour le resume)
+    processed = state.setdefault("processed_files", {})  # path -> True (juste la présence compte, pour le resume)
     corrected = set(state.setdefault("corrected_files", []))  # uniquement les vraies corrections
     manual_review = set(state.get("manual_review", []))  # tranchés manuellement, jamais retraités
 
@@ -359,16 +351,15 @@ def _main_body() -> None:
 
         scanned += 1
         rel = str(path.relative_to(library_root))
-        checksum = file_checksum(path)
 
         if rel in manual_review:
             continue  # décision tranchée manuellement via le dashboard, jamais retraité
 
-        if processed.get(rel) == checksum:
-            continue  # déjà traité et contenu inchangé depuis (comparaison par checksum, pas par mtime)
+        if rel in processed:
+            continue  # déjà traité une fois, on ne revient jamais dessus (juste le chemin, pas de checksum/mtime)
 
         try:
-            was_modified, asset_id, final_checksum = process_file(path, library_root, cfg, checksum)
+            was_modified, asset_id = process_file(path, library_root, cfg)
             if was_modified:
                 corrected_count += 1
                 corrected.add(rel)
@@ -378,7 +369,7 @@ def _main_body() -> None:
             log(SCRIPT_NAME, f"Erreur sur {path} : {e}", "ERROR")
             continue
 
-        processed[rel] = final_checksum
+        processed[rel] = True
         state["corrected_files"] = sorted(corrected)
 
         if scanned % PROGRESS_EVERY == 0:

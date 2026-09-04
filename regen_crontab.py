@@ -24,7 +24,9 @@ def main() -> None:
         section = cfg.get(config_key, {})
         if not section.get("enabled", True):
             continue
-        schedule = section.get("schedule", "0 3 * * *")
+        schedule = section.get("schedule", "").strip()
+        if not schedule:
+            continue  # planification vide -> job désactivé, aucune ligne cron générée
         full_cmd = f"{command} >> /data/logs/{log_name}.cron.log 2>&1"
         lines.append(f"{schedule} root {full_cmd}")
 

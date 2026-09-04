@@ -7,12 +7,14 @@ pour chaque lien {personId, albumId} défini dans la config, recherche tous
 les assets où cette personne apparaît, et les ajoute à l'album s'ils n'y
 sont pas déjà.
 """
+import os
+import signal
 import sys
 
 import requests
 
 sys.path.insert(0, "/app")
-from common_config import load_config, log
+from common_config import load_config, log, STATE_DIR
 
 SCRIPT_NAME = "person_to_album"
 
@@ -74,7 +76,43 @@ def add_assets_to_album(server: str, api_key: str, album_id: str, asset_ids: lis
         log(SCRIPT_NAME, f"Erreur ajout à l'album {album_id} : {e}", "ERROR")
 
 
+LOCK_PATH = STATE_DIR / f"{SCRIPT_NAME}.lock"
+
+
+def _acquire_lock() -> bool:
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    if LOCK_PATH.exists():
+        try:
+            old_pid = int(LOCK_PATH.read_text().strip())
+            os.kill(old_pid, 0)
+            return False
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+    LOCK_PATH.write_text(str(os.getpid()))
+    return True
+
+
+def _release_lock() -> None:
+    LOCK_PATH.unlink(missing_ok=True)
+
+
+def _handle_sigterm(signum, frame):
+    log(SCRIPT_NAME, "Arrêt demandé.", "WARN")
+    sys.exit(0)
+
+
 def main() -> None:
+    if not _acquire_lock():
+        log(SCRIPT_NAME, "Une autre instance tourne déjà, run ignoré.", "WARN")
+        return
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+    try:
+        _main_body()
+    finally:
+        _release_lock()
+
+
+def _main_body() -> None:
     cfg = load_config()
     if not cfg["person_to_album"]["enabled"]:
         log(SCRIPT_NAME, "Script désactivé dans la config, arrêt.")
