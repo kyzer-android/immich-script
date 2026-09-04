@@ -13,7 +13,6 @@ import signal
 import subprocess
 import sys
 import threading
-from datetime import datetime, timezone
 from pathlib import Path
 
 import piexif
@@ -460,12 +459,6 @@ def save_manual_rotation(payload: ManualRotationSave):
         raise HTTPException(404, "Fichier introuvable")
 
     if payload.angle != 0:
-        # Backup avant modification, même politique que le script automatique
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        backup_dest = BACKUP_DIR / ts / payload.relative_path
-        backup_dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(library_path, backup_dest)
-
         img = PILImage.open(library_path)
         icc_profile = img.info.get("icc_profile")
         img = img.rotate(-payload.angle, expand=True)  # -angle = sens horaire, cohérent avec l'aperçu
