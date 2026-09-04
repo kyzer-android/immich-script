@@ -310,7 +310,7 @@ def resolve_gallery_batch(payload: GalleryResolveBatch):
             state = json.load(f)
     manual_review = set(state.get("manual_review", []))
     processed_files = state.setdefault("processed_files", {})
-    corrected_files = set(state.get("corrected_files", []))
+    corrected_files = list(state.get("corrected_files", []))  # ordre chronologique préservé
     needs_manual_rotation = set(state.get("needs_manual_rotation", []))
 
     done, errors = 0, []
@@ -354,7 +354,8 @@ def resolve_gallery_batch(payload: GalleryResolveBatch):
                 shutil.copy2(backup_path, library_path)
                 backup_path.unlink()
                 processed_files.pop(item.relative_path, None)
-                corrected_files.discard(item.relative_path)
+                if item.relative_path in corrected_files:
+                    corrected_files.remove(item.relative_path)
                 needs_manual_rotation.add(item.relative_path)
                 done += 1
 
@@ -364,7 +365,7 @@ def resolve_gallery_batch(payload: GalleryResolveBatch):
             errors.append(item.relative_path)
 
     state["manual_review"] = sorted(manual_review)
-    state["corrected_files"] = sorted(corrected_files)
+    state["corrected_files"] = corrected_files
     state["needs_manual_rotation"] = sorted(needs_manual_rotation)
     STATE_DIR.mkdir(parents=True, exist_ok=True)
     with open(state_path, "w", encoding="utf-8") as f:
@@ -381,36 +382,49 @@ STATE_FILES = {
 
 
 @app.get("/api/state/{script_name}")
-def get_state(script_name: str, limit: int = 200):
+def get_state(script_name: str, limit: int = 10):
     if script_name not in STATE_FILES:
         raise HTTPException(404, "Pas d'état suivi pour ce script")
     key, filename = STATE_FILES[script_name]
     path = STATE_DIR / filename
 
-    total = None
-    if script_name in ("orientation_fix", "orientation_fix_corrected"):
-        cfg = load_config()
-        library_root = Path(cfg["orientation"]["library_path"])
-        user_id = cfg["orientation"].get("user_id", "").strip()
-        if user_id:
-            library_root = library_root / user_id
-        formats = tuple(cfg["orientation"]["formats"])
-        if library_root.exists():
-            total = sum(1 for p in library_root.rglob("*") if p.is_file() and p.suffix.lower() in formats)
-
     if not path.exists():
-        return {"count": 0, "total": total, "sample": []}
+        return {"count": 0, "total": None, "remaining": None, "session_processed": None, "sample": []}
 
     with open(path, "r", encoding="utf-8") as f:
         state = json.load(f)
 
-    items = state.get(key, {})
-    if isinstance(items, dict):
-        all_keys = sorted(items.keys())
-    else:  # liste (ex: bloomin8_optimize, corrected_files)
-        all_keys = sorted(items)
+    # Total mis en cache par orientation_fix.py lui-même (une fois par run),
+    # PAS recalculé ici : un rglob() sur ~32000 fichiers via NFS à chaque
+    # poll de 5s de l'onglet État a bien failli refaire planter la VM.
+    total = state.get("total_files") if script_name in ("orientation_fix", "orientation_fix_corrected") else None
 
-    return {"count": len(all_keys), "total": total, "sample": all_keys[:limit], "truncated": len(all_keys) > limit}
+    items = state.get(key, {})
+    all_keys = list(items.keys()) if isinstance(items, dict) else list(items)
+    count = len(all_keys)
+
+    # Pas d'intérêt à afficher/trier des milliers de chemins : seuls les
+    # derniers traités (ordre d'insertion == ordre chronologique, préservé
+    # par le JSON) sont utiles pour un coup d'œil rapide.
+    last_n = all_keys[-limit:][::-1] if limit else []
+
+    remaining = (total - count) if total is not None else None
+
+    session_processed = None
+    session = state.get("session")
+    if session and script_name == "orientation_fix":
+        # Uniquement pour la vue "traités" (pas "corrected"), le compte
+        # global de fichiers examinés est le bon référentiel pour ce calcul.
+        full_processed_count = len(state.get("processed_files", {}))
+        session_processed = full_processed_count - session.get("count_at_start", full_processed_count)
+
+    return {
+        "count": count,
+        "total": total,
+        "remaining": remaining,
+        "session_processed": session_processed,
+        "sample": last_n,
+    }
 
 
 @app.get("/api/manual-rotation")
