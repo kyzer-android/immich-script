@@ -352,29 +352,24 @@ def _main_body() -> None:
         scanned += 1
         rel = str(path.relative_to(library_root))
 
-        if rel in manual_review:
-            continue  # décision tranchée manuellement via le dashboard, jamais retraité
-
-        if rel in processed:
-            continue  # déjà traité une fois, on ne revient jamais dessus (juste le chemin, pas de checksum/mtime)
-
-        try:
-            was_modified, asset_id = process_file(path, library_root, cfg)
-            if was_modified:
-                corrected_count += 1
-                corrected.add(rel)
-            if asset_id:
-                modified_asset_ids.append(asset_id)
-        except Exception as e:
-            log(SCRIPT_NAME, f"Erreur sur {path} : {e}", "ERROR")
-            continue
-
-        processed[rel] = True
-        state["corrected_files"] = sorted(corrected)
+        if rel in manual_review or rel in processed:
+            pass  # décision déjà tranchée / déjà traité — rien à faire pour ce fichier
+        else:
+            try:
+                was_modified, asset_id = process_file(path, library_root, cfg)
+                if was_modified:
+                    corrected_count += 1
+                    corrected.add(rel)
+                if asset_id:
+                    modified_asset_ids.append(asset_id)
+                processed[rel] = True
+                state["corrected_files"] = sorted(corrected)
+            except Exception as e:
+                log(SCRIPT_NAME, f"Erreur sur {path} : {e}", "ERROR")
 
         if scanned % PROGRESS_EVERY == 0:
             manual_review = _refresh_manual_review(state, manual_review)
-            save_state(SCRIPT_NAME, state)  # persiste régulièrement, pas seulement en fin de run
+            save_state(SCRIPT_NAME, state)  # persiste régulièrement, peu importe skip ou traitement réel
             log(SCRIPT_NAME, f"Progression : {scanned}/{total_files} scanné(s), {corrected_count} corrigé(s) jusqu'ici.")
 
     manual_review = _refresh_manual_review(state, manual_review)

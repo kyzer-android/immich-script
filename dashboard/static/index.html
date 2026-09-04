@@ -279,7 +279,16 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
     if (btn.dataset.tab === 'backups') loadBackups();
     if (btn.dataset.tab === 'logs') loadLogs();
-    if (btn.dataset.tab === 'state') loadState();
+
+    if (stateAutoRefreshInterval) {
+      clearInterval(stateAutoRefreshInterval);
+      stateAutoRefreshInterval = null;
+    }
+    if (btn.dataset.tab === 'state') {
+      loadState();
+      stateAutoRefreshInterval = setInterval(loadState, 5000); // rafraîchit toutes les 5s tant que l'onglet est ouvert
+    }
+
     if (btn.dataset.tab === 'manual-rotation') loadManualRotation();
     if (btn.dataset.tab === 'gallery') loadGallery();
   });
@@ -431,7 +440,6 @@ async function loadLogs() {
 }
 
 let manualRotationAngles = {}; // relative_path -> angle courant (0/90/180/270)
-
 async function loadManualRotation() {
   const resp = await fetch('/api/manual-rotation');
   const paths = await resp.json();
@@ -492,6 +500,7 @@ async function saveManualRotation(relPath) {
     showStatus('Erreur à l\'enregistrement.', false);
   }
 }
+let gallerySelections = {}; // "backup_id|relative_path" -> "before" | "after" | "unresolved", conservé entre les pages
 let currentGalleryOffset = 0;
 let currentGalleryPageSize = 50;
 let currentGalleryTotal = 0;
@@ -669,6 +678,8 @@ async function pollScriptStatus(scriptName, btn, stopBtn, statusEl) {
     }
   }, 3000);
 }
+
+let stateAutoRefreshInterval = null;
 
 async function loadState() {
   const script = document.getElementById('state-script').value;
