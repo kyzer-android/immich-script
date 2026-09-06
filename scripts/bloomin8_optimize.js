@@ -211,7 +211,7 @@ function clamp255(v) {
   return v < 0 ? 0 : v > 255 ? 255 : Math.round(v);
 }
 
-async function optimizeForBloomin8(buffer, targetWidth, targetHeight, colorOptions) {
+async function optimizeForBloomin8(buffer, targetWidth, targetHeight, colorOptions, orientation) {
   const img = await loadImage(buffer);
 
   // Resize + crop centré ("cover") pour remplir exactement la résolution cible
@@ -237,10 +237,27 @@ async function optimizeForBloomin8(buffer, targetWidth, targetHeight, colorOptio
   applyColorGrading(imageData, colorOptions);
   ctx.putImageData(imageData, 0, 0);
 
+  let finalCanvas = canvas;
+
+  // Rotation de compensation : le firmware BLOOMIN8 attend son buffer natif
+  // dans un sens fixe et NE le réoriente PAS lui-même côté API /eink_pull
+  // (contrairement à l'add-on officiel qui le fait automatiquement — cf.
+  // ses release notes : "Landscape mode rotates image 90° clockwise for
+  // device API"). Confirmé par test manuel : sans cette rotation, l'image
+  // ressort pivotée et déborde du cadre en montage paysage.
+  if (orientation === "landscape") {
+    const rotated = createCanvas(targetHeight, targetWidth); // dimensions inversées
+    const rctx = rotated.getContext("2d");
+    rctx.translate(targetHeight, 0);
+    rctx.rotate(Math.PI / 2); // 90° horaire
+    rctx.drawImage(canvas, 0, 0);
+    finalCanvas = rotated;
+  }
+
   // Qualité élevée : l'image reste en tons continus, donc pas de motif de
   // dithering à préserver ici (contrairement à l'ancienne approche
   // epdoptimize) — un JPEG classique à quality 0.95 convient très bien.
-  return canvas.toBuffer("image/jpeg", { quality: 0.95 });
+  return finalCanvas.toBuffer("image/jpeg", { quality: 0.95 });
 }
 
 async function mainBody() {
@@ -319,7 +336,8 @@ async function mainBody() {
         original,
         bloomin8.resolution.width,
         bloomin8.resolution.height,
-        colorOptions
+        colorOptions,
+        bloomin8.orientation
       );
       const outPath = path.join(destDir, `${asset.id}.jpg`);
       fs.writeFileSync(outPath, optimized);
