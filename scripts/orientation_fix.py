@@ -24,6 +24,7 @@ import signal
 import sys
 import time
 from datetime import datetime, timedelta, timezone
+from multiprocessing import Process, Queue
 from pathlib import Path
 
 import cv2
@@ -262,6 +263,50 @@ LOCK_PATH = STATE_DIR / f"{SCRIPT_NAME}.lock"
 _stop_requested = False
 
 
+def _process_file_worker(path: Path, library_root: Path, cfg: dict, queue: Queue) -> None:
+    """Exécuté dans un sous-process dédié : process_file() peut bloquer
+    indéfiniment sur un appel kernel-level non interruptible (lecture NFS
+    en mode "hard" qui hoquette) — un SIGTERM ne suffit pas dans ce cas,
+    seul un sous-process séparé peut être tué de force (SIGKILL) sans
+    affecter le run principal."""
+    try:
+        result = process_file(path, library_root, cfg)
+        queue.put(("ok", result))
+    except Exception as e:
+        queue.put(("error", str(e)))
+
+
+def _process_file_with_timeout(
+    path: Path, library_root: Path, cfg: dict, timeout_seconds: int
+) -> tuple[bool, str | None, bool]:
+    """Retourne (a_été_modifié, assetId, a_timeout). Isole process_file()
+    dans un sous-process pour pouvoir le tuer de force au-delà du délai."""
+    queue: Queue = Queue()
+    proc = Process(target=_process_file_worker, args=(path, library_root, cfg, queue), daemon=True)
+    proc.start()
+    proc.join(timeout_seconds)
+
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(5)
+        if proc.is_alive():
+            proc.kill()  # SIGKILL — dernier recours si terminate() (SIGTERM) n'a pas suffi
+            proc.join(5)
+        return False, None, True
+
+    if not queue.empty():
+        status, payload = queue.get()
+        if status == "ok":
+            was_modified, asset_id = payload
+            return was_modified, asset_id, False
+        else:
+            raise RuntimeError(payload)
+
+    # Process terminé sans rien mettre dans la queue (crash silencieux,
+    # ex: SIGKILL externe type OOM) — traité comme une erreur classique.
+    raise RuntimeError(f"Sous-process terminé sans résultat (code {proc.exitcode})")
+
+
 def _handle_sigterm(signum, frame):
     global _stop_requested
     _stop_requested = True
@@ -327,11 +372,14 @@ def _main_body() -> None:
         return
 
     formats = tuple(cfg["orientation"]["formats"])
+    timeout_seconds = cfg["orientation"].get("file_timeout_seconds", 60)
+    max_timeout_retries = cfg["orientation"].get("max_timeout_retries", 3)
     state = load_state(SCRIPT_NAME)
     processed = state.setdefault("processed_files", {})  # path -> True (juste la présence compte, pour le resume)
     corrected_list = state.setdefault("corrected_files", [])  # ordre chronologique préservé (pas trié)
     corrected_seen = set(corrected_list)  # pour les lookups O(1) sans dupliquer la liste
     manual_review = set(state.get("manual_review", []))  # tranchés manuellement, jamais retraités
+    timeout_counts = state.setdefault("timeout_counts", {})  # path -> nb de timeouts consécutifs
 
     # Instantané de début de session : permet au dashboard de calculer
     # "traités depuis le début de CETTE session", distinct du total cumulé.
@@ -354,6 +402,7 @@ def _main_body() -> None:
 
     modified_asset_ids: list[str] = []
     corrected_count = 0
+    timeout_count_this_run = 0
     scanned = 0
     PROGRESS_EVERY = 10
 
@@ -371,15 +420,41 @@ def _main_body() -> None:
             pass  # décision déjà tranchée / déjà traité — rien à faire pour ce fichier
         else:
             try:
-                was_modified, asset_id = process_file(path, library_root, cfg)
-                if was_modified:
-                    corrected_count += 1
-                    if rel not in corrected_seen:
-                        corrected_list.append(rel)
-                        corrected_seen.add(rel)
-                if asset_id:
-                    modified_asset_ids.append(asset_id)
-                processed[rel] = True
+                was_modified, asset_id, timed_out = _process_file_with_timeout(
+                    path, library_root, cfg, timeout_seconds
+                )
+                if timed_out:
+                    timeout_count_this_run += 1
+                    retries = timeout_counts.get(rel, 0) + 1
+                    timeout_counts[rel] = retries
+                    if retries >= max_timeout_retries:
+                        log(
+                            SCRIPT_NAME,
+                            f"Timeout ({timeout_seconds}s) x{retries} sur {path} — abandon, "
+                            f"marqué traité pour ne pas bloquer le run indéfiniment.",
+                            "ERROR",
+                        )
+                        processed[rel] = True  # abandon définitif : on avance plutôt que de rester planté
+                    else:
+                        log(
+                            SCRIPT_NAME,
+                            f"Timeout ({timeout_seconds}s) sur {path} — probable hoquet NFS, "
+                            f"nouvelle tentative au prochain passage ({retries}/{max_timeout_retries}).",
+                            "WARN",
+                        )
+                        # PAS marqué processed : sera retenté au prochain run
+                    state["timeout_counts"] = timeout_counts
+                else:
+                    timeout_counts.pop(rel, None)  # succès après un éventuel timeout précédent : on efface le compteur
+                    state["timeout_counts"] = timeout_counts
+                    if was_modified:
+                        corrected_count += 1
+                        if rel not in corrected_seen:
+                            corrected_list.append(rel)
+                            corrected_seen.add(rel)
+                    if asset_id:
+                        modified_asset_ids.append(asset_id)
+                    processed[rel] = True
                 state["corrected_files"] = corrected_list
             except Exception as e:
                 log(SCRIPT_NAME, f"Erreur sur {path} : {e}", "ERROR")
@@ -397,7 +472,7 @@ def _main_body() -> None:
         trigger_immich_jobs(cfg["immich"]["server"], cfg["immich"]["api_key"], modified_asset_ids)
         log(SCRIPT_NAME, f"Job Immich déclenché pour {len(modified_asset_ids)} asset(s).")
 
-    log(SCRIPT_NAME, f"Run terminé. {scanned} fichier(s) scanné(s), {corrected_count} corrigé(s), {len(modified_asset_ids)} régénération(s) Immich déclenchée(s).")
+    log(SCRIPT_NAME, f"Run terminé. {scanned} fichier(s) scanné(s), {corrected_count} corrigé(s), {timeout_count_this_run} timeout(s), {len(modified_asset_ids)} régénération(s) Immich déclenchée(s).")
 
 
 if __name__ == "__main__":

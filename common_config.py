@@ -31,6 +31,16 @@ DEFAULT_CONFIG = {
         "backup_retention_days": int(os.environ.get("BACKUP_RETENTION_DAYS", "30")),
         "face_detection_fallback": True,
         "formats": [".jpg", ".jpeg", ".heic", ".heif", ".png"],
+        # Timeout dur par fichier (sous-process tuable de force). Protège
+        # contre un blocage kernel-level non interruptible par signal —
+        # typiquement un hoquet sur un montage NFS en mode "hard" (cf.
+        # incident du 2026-09-06 : SIGTERM resté sans effet pendant 3h+).
+        "file_timeout_seconds": int(os.environ.get("ORIENTATION_FILE_TIMEOUT", "60")),
+        # Après ce nombre de timeouts consécutifs sur le MÊME fichier, on
+        # abandonne et on le marque traité (avec un WARN) pour ne pas
+        # bloquer indéfiniment tout le run sur un fichier structurellement
+        # inaccessible (au lieu de le retenter à chaque passage, à vie).
+        "max_timeout_retries": int(os.environ.get("ORIENTATION_MAX_TIMEOUT_RETRIES", "3")),
     },
     "person_to_album": {
         "enabled": True,
