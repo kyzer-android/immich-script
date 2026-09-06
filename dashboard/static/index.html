@@ -107,6 +107,16 @@
 <!-- ===== CONFIGURATION ===== -->
 <div class="panel active" id="panel-config">
 
+  <h2>📋 Journalisation</h2>
+  <label>Niveau minimum persisté dans les logs consultés par ce dashboard (la console/cron affiche toujours tout)</label>
+  <select id="log_level">
+    <option value="INFO">INFO — tout, y compris le détail de chaque fichier</option>
+    <option value="WARN">WARN — avertissements et erreurs uniquement</option>
+    <option value="ERROR">ERROR — erreurs uniquement</option>
+  </select>
+
+  <hr style="border-color: var(--border); margin: 20px 0;">
+
   <h2>🔑 Connexion Immich</h2>
   <label>Serveur</label>
   <input type="text" id="immich_server">
@@ -124,6 +134,10 @@
   <label>Rétention des backups (jours)</label>
   <input type="number" id="orientation_backup_retention">
   <div class="row"><input type="checkbox" id="orientation_face_fallback"> <span>Fallback détection de visage</span></div>
+  <label>Timeout par fichier (secondes) — protège contre un blocage I/O (ex: hoquet NFS)</label>
+  <input type="number" id="orientation_file_timeout">
+  <label>Nombre de timeouts avant d'abandonner un fichier (marqué traité sans être corrigé)</label>
+  <input type="number" id="orientation_max_timeout_retries">
   <div class="row">
     <button class="secondary" id="run-orientation-btn" onclick="runScript('orientation_fix')">▶️ Exécuter maintenant</button>
     <button class="secondary danger" id="stop-orientation-btn" onclick="stopScript('orientation_fix')" style="display:none;">⏹ Stop</button>
@@ -299,6 +313,8 @@ async function loadConfig() {
   currentConfig = await resp.json();
   const c = currentConfig;
 
+  document.getElementById('log_level').value = c.log_level || 'WARN';
+
   document.getElementById('immich_server').value = c.immich.server;
   document.getElementById('immich_api_key').value = c.immich.api_key;
 
@@ -307,6 +323,8 @@ async function loadConfig() {
   document.getElementById('orientation_user_id').value = c.orientation.user_id || '';
   document.getElementById('orientation_backup_retention').value = c.orientation.backup_retention_days;
   document.getElementById('orientation_face_fallback').checked = c.orientation.face_detection_fallback;
+  document.getElementById('orientation_file_timeout').value = c.orientation.file_timeout_seconds ?? 60;
+  document.getElementById('orientation_max_timeout_retries').value = c.orientation.max_timeout_retries ?? 3;
 
   document.getElementById('p2a_enabled').checked = c.person_to_album.enabled;
   document.getElementById('p2a_schedule').value = c.person_to_album.schedule;
@@ -362,6 +380,8 @@ function collectLinksFromDOM() {
 
 async function saveConfig() {
   const c = currentConfig;
+  c.log_level = document.getElementById('log_level').value;
+
   c.immich.server = document.getElementById('immich_server').value;
   c.immich.api_key = document.getElementById('immich_api_key').value;
 
@@ -370,6 +390,8 @@ async function saveConfig() {
   c.orientation.user_id = document.getElementById('orientation_user_id').value.trim();
   c.orientation.backup_retention_days = parseInt(document.getElementById('orientation_backup_retention').value, 10);
   c.orientation.face_detection_fallback = document.getElementById('orientation_face_fallback').checked;
+  c.orientation.file_timeout_seconds = parseInt(document.getElementById('orientation_file_timeout').value, 10);
+  c.orientation.max_timeout_retries = parseInt(document.getElementById('orientation_max_timeout_retries').value, 10);
 
   c.person_to_album.enabled = document.getElementById('p2a_enabled').checked;
   c.person_to_album.schedule = document.getElementById('p2a_schedule').value;

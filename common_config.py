@@ -19,6 +19,11 @@ LOG_DIR = DATA_DIR / "logs"
 BACKUP_DIR = DATA_DIR / "backups"
 
 DEFAULT_CONFIG = {
+    # Niveau minimum persisté dans les fichiers .log lus par le dashboard.
+    # La console (logs cron bruts) affiche TOUJOURS tout, quel que soit ce
+    # réglage — ça ne filtre que ce qui est écrit sur disque pour éviter de
+    # noyer le dashboard sous des milliers de lignes INFO.
+    "log_level": os.environ.get("LOG_LEVEL", "WARN"),  # INFO | WARN | ERROR
     "immich": {
         "server": os.environ.get("IMMICH_SERVER", "http://192.168.1.205:2283"),
         "api_key": os.environ.get("IMMICH_API_KEY", ""),
@@ -125,21 +130,42 @@ def save_state(name: str, state: dict) -> None:
 
 
 LOG_LEVELS = {"INFO": 0, "WARN": 1, "ERROR": 2}
-PERSISTED_LOG_MIN_LEVEL = "WARN"  # seuls WARN/ERROR vont dans le fichier lu par le dashboard
+_log_level_cache = {"mtime": None, "level": "WARN"}
+
+
+def _get_persisted_log_level() -> str:
+    """Lit orientation.log_level (ou la racine, pour rétrocompatibilité)
+    depuis config.json, avec un cache invalidé sur changement de mtime —
+    évite de reparser tout le JSON à chaque appel de log() (potentiellement
+    des milliers par run) tout en restant modifiable à chaud sans redémarrage."""
+    try:
+        mtime = CONFIG_PATH.stat().st_mtime
+    except FileNotFoundError:
+        return _log_level_cache["level"]
+
+    if mtime != _log_level_cache["mtime"]:
+        level = load_config().get("log_level", "WARN")
+        if level not in LOG_LEVELS:
+            level = "WARN"
+        _log_level_cache["mtime"] = mtime
+        _log_level_cache["level"] = level
+
+    return _log_level_cache["level"]
 
 
 def log(script: str, message: str, level: str = "INFO") -> None:
     """Log simple, fichier par script, lu ensuite par le dashboard.
 
     Tous les niveaux sont affichés en console (capturés intégralement dans
-    les logs cron bruts, utiles pour du debug approfondi en SSH), mais seuls
-    WARN/ERROR sont persistés dans le fichier lu par le dashboard, pour
-    éviter de le noyer sous des milliers de lignes INFO sans intérêt."""
+    les logs cron bruts, utiles pour du debug approfondi en SSH), mais seul
+    le niveau minimum configuré (config.json -> log_level, réglable depuis
+    le dashboard) est persisté dans le fichier lu par le dashboard."""
     ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     line = f"{ts} [{level}] {message}"
     print(line)
 
-    if LOG_LEVELS.get(level, 0) >= LOG_LEVELS[PERSISTED_LOG_MIN_LEVEL]:
+    min_level = _get_persisted_log_level()
+    if LOG_LEVELS.get(level, 0) >= LOG_LEVELS[min_level]:
         LOG_DIR.mkdir(parents=True, exist_ok=True)
         with open(LOG_DIR / f"{script}.log", "a", encoding="utf-8") as f:
             f.write(line + "\n")
