@@ -329,13 +329,28 @@ def _main_body() -> None:
     formats = tuple(cfg["orientation"]["formats"])
     state = load_state(SCRIPT_NAME)
     processed = state.setdefault("processed_files", {})  # path -> True (juste la présence compte, pour le resume)
-    corrected = set(state.setdefault("corrected_files", []))  # uniquement les vraies corrections
+    corrected_list = state.setdefault("corrected_files", [])  # ordre chronologique préservé (pas trié)
+    corrected_seen = set(corrected_list)  # pour les lookups O(1) sans dupliquer la liste
     manual_review = set(state.get("manual_review", []))  # tranchés manuellement, jamais retraités
+
+    # Instantané de début de session : permet au dashboard de calculer
+    # "traités depuis le début de CETTE session", distinct du total cumulé.
+    state["session"] = {
+        "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "count_at_start": len(processed),
+    }
+    save_state(SCRIPT_NAME, state)
 
     log(SCRIPT_NAME, f"Comptage des fichiers à scanner dans {library_root}...")
     all_files = [p for p in library_root.rglob("*") if p.is_file() and p.suffix.lower() in formats]
     total_files = len(all_files)
     log(SCRIPT_NAME, f"{total_files} fichier(s) au total à examiner.")
+
+    # Mis en cache pour le dashboard (onglet État) : évite de refaire un scan
+    # récursif complet du NFS à chaque poll (c'était la cause du run haute
+    # charge CPU/IO du run précédent, cf. discussion).
+    state["total_files"] = total_files
+    save_state(SCRIPT_NAME, state)
 
     modified_asset_ids: list[str] = []
     corrected_count = 0
@@ -359,11 +374,13 @@ def _main_body() -> None:
                 was_modified, asset_id = process_file(path, library_root, cfg)
                 if was_modified:
                     corrected_count += 1
-                    corrected.add(rel)
+                    if rel not in corrected_seen:
+                        corrected_list.append(rel)
+                        corrected_seen.add(rel)
                 if asset_id:
                     modified_asset_ids.append(asset_id)
                 processed[rel] = True
-                state["corrected_files"] = sorted(corrected)
+                state["corrected_files"] = corrected_list
             except Exception as e:
                 log(SCRIPT_NAME, f"Erreur sur {path} : {e}", "ERROR")
 

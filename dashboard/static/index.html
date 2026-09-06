@@ -683,7 +683,7 @@ let stateAutoRefreshInterval = null;
 
 async function loadState() {
   const script = document.getElementById('state-script').value;
-  const resp = await fetch(`/api/state/${script}?limit=300`);
+  const resp = await fetch(`/api/state/${script}`);
   if (!resp.ok) {
     document.getElementById('state-count').textContent = 'Pas de données pour ce script.';
     document.getElementById('state-list').innerHTML = '';
@@ -691,10 +691,25 @@ async function loadState() {
   }
   const data = await resp.json();
   const totalLabel = data.total !== null && data.total !== undefined ? ` sur ${data.total} au total` : '';
-  document.getElementById('state-count').textContent =
-    `${data.count} fichier(s) marqué(s) comme traité(s)${totalLabel}` + (data.truncated ? ` (300 premiers affichés ci-dessous)` : '');
+  const line1 = `${data.count} fichier(s) traité(s)${totalLabel}`;
+
+  let line2 = '';
+  if (data.session_processed !== null && data.session_processed !== undefined && data.remaining !== null && data.remaining !== undefined) {
+    line2 = `${data.session_processed} sur ${data.remaining} restant(s) traité(s) depuis le début de cette session`;
+  }
+
+  document.getElementById('state-count').innerHTML =
+    line2 ? `${line1}<br>${line2}` : line1;
+
   const container = document.getElementById('state-list');
   container.innerHTML = '';
+  if (data.sample.length) {
+    const header = document.createElement('div');
+    header.style.opacity = '0.6';
+    header.style.marginBottom = '4px';
+    header.textContent = '10 derniers traités :';
+    container.appendChild(header);
+  }
   data.sample.forEach(path => {
     const div = document.createElement('div');
     div.className = 'log-line';
