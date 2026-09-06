@@ -91,21 +91,42 @@ function clearDestination(destDir) {
 }
 
 async function fetchAlbumAssets(server, apiKey, albumId) {
-  const resp = await fetch(`${server}/api/albums/${albumId}`, {
-    headers: { "x-api-key": apiKey },
+  const url = `${server}/api/search/metadata`;
+
+  const body = {
+    albumIds: [albumId],
+    page: 1,
+    size: 1000,
+    type: 'IMAGE'
+  };
+
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "x-api-key": apiKey,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
   });
+
   if (!resp.ok) {
-    throw new Error(`Erreur lecture album ${albumId} : HTTP ${resp.status}`);
+    throw new Error(
+      `Erreur lecture album ${albumId} : HTTP ${resp.status}`
+    );
   }
+
   const data = await resp.json();
-  return data.assets || [];
+  const assets = data.assets?.items || [];
+
+  log(`Album ${albumId} lu : ${assets.length} asset(s)`);
+  return assets;
 }
 
 function matchesOrientation(asset, wantedOrientation) {
   // exifInfo.exifImageWidth/Height reflètent les dimensions réelles du fichier
   // après la normalisation faite par orientation_fix.py (EXIF Orientation=1).
-  const w = asset?.exifInfo?.exifImageWidth;
-  const h = asset?.exifInfo?.exifImageHeight;
+  const w = asset?.width;
+  const h = asset?.height;
   if (!w || !h) return false; // pas de métadonnées fiables -> exclu (traitement strict)
   const isPortrait = h > w;
   return wantedOrientation === "portrait" ? isPortrait : !isPortrait;
